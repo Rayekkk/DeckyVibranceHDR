@@ -36,11 +36,11 @@ atom value: 1.0 on a wide-gamut panel, 0.0 on any other. The slider keeps one
 meaning and the mapping follows the panel, chosen by gamescope's own
 `BIsWideGamut()` test against the published EDID.
 
-A wide-gamut panel gets 100-300%, all of it from the atom. A standard one gets
-100-400%: the atom carries the first hundred points and gives out there, because
-`cfit()` clamps it, so the rest comes from a look on the SDR path -
-`GAMESCOPE_COLOR_LOOK_G22`, generated in the gamma 2.2 domain by the same ICtCp
-code as the HDR half.
+Both end at 300%, but not by the same route. On a wide-gamut panel the atom
+carries all of it. On a standard one it carries the first hundred points and
+gives out there, because `cfit()` clamps it, so the rest comes from a look on
+the SDR path - `GAMESCOPE_COLOR_LOOK_G22`, generated in the gamma 2.2 domain by
+the same ICtCp code as the HDR half.
 
 Everything is applied to the built-in panel only. An external display is left
 alone and the settings come back when it is unplugged, followed live through

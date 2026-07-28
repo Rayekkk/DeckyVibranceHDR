@@ -25,7 +25,7 @@ saturated - and the mapping underneath follows the panel:
 | panel | slider | atom | look |
 |---|---|---|---|
 | wide gamut | 100-300% | 1.0-3.0 | never written |
-| standard gamut | 100-400% | 0.0-1.0 over the first 100 points | 1.0-2.0 over the rest |
+| standard gamut | 100-300% | 0.0-1.0 over the first 100 points | 1.0-1.5 over the rest |
 
 On the standard branch `cfit()` clamps the atom at what the slider calls 200%,
 so past that there is nothing left for it to push. The rest of the range is
@@ -83,8 +83,8 @@ Black maps to black by construction, which keeps gamescope's
   affects only games actually running in HDR.
 - **Neither slider goes below 100%.** Both bottom out at neutral. Below that the
   picture is being drained rather than lifted, and that is a different control.
-- **The SDR range follows the panel** — 100–300% on a wide-gamut display,
-  100–400% on a standard one, with 100% neutral either way. See above.
+- **The SDR range is 100–300% either way,** with 100% neutral. What changes with
+  the panel is what carries it — see above.
 - **Only the built-in panel.** An external display is somebody else's panel and
   every number here was measured against this one, so plugging one in makes the
   plugin stand down and unplugging it brings the settings back. gamescope says
