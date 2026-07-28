@@ -1,0 +1,3 @@
+# The plugin runs on Linux; keep the repo free of CRLF whatever the
+# checkout platform does locally.
+* text=auto eol=lf

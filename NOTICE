@@ -1,0 +1,34 @@
+DeckyVibranceHDR
+Copyright (c) 2026 Rayekkk
+
+This product is licensed under the MIT License. See LICENSE for the full text.
+
+================================================================================
+Third-party components
+================================================================================
+
+None are bundled. The release archive contains only this plugin's own source
+and its compiled frontend.
+
+The plugin shells out to `xprop` (xorg-xprop) to read and write the gamescope
+atoms. It is already part of SteamOS and is not redistributed here.
+
+`lego_updater.py` is shared verbatim with the author's other DeckyLoader
+plugins, so a fix to the trust store or the host allowlist lands in all of
+them. It is not third-party code.
+
+================================================================================
+Prior art
+================================================================================
+
+vibrantDeck by Scrumplex (https://github.com/libvibrant/vibrantDeck, LGPL-3.0)
+solves the SDR half by writing the same gamescope atom. No code from it is used
+here - the atom is a public gamescope interface and this plugin's own
+implementation, its HDR half, and its colour maths were written from scratch -
+but it deserves the credit for getting there first.
+
+Reading it is also where the idea of detecting resume-from-suspend by comparing
+CLOCK_MONOTONIC against CLOCK_BOOTTIME came from, and the observation that
+gamescope can clobber these atoms while it re-initialises, so the values have to
+go back more than once. The implementation here is independent, but the insight
+is theirs and it is worth saying so.

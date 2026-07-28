@@ -1,0 +1,18 @@
+{
+  "name": "Decky Vibrance HDR",
+  "author": "Rayek",
+  "flags": [],
+  "api_version": 1,
+  "main": "main.py",
+  "bin": "dist/index.js",
+  "version": "1.0.0",
+  "publish": {
+    "tags": [
+      "utilities",
+      "display",
+      "color"
+    ],
+    "description": "Saturation control for both SDR and HDR content under gamescope. SDR uses gamescope's own gamut wideness dial; HDR has no such dial, so the plugin generates a colour LUT and hands it to gamescope's HDR look slot. The HDR adjustment is computed in ICtCp, so raising saturation does not drag lightness or hue along with it.",
+    "image": ""
+  }
+}
