@@ -1,161 +1,278 @@
-# Decky Vibrance HDR
+<div align="center">
 
-Saturation control for **both SDR and HDR** content under gamescope, in one
-plugin.
+<img src="docs/logo.png" alt="DeckyVibranceHDR" width="760">
 
-The two halves do the same thing by completely different means, because
-gamescope only gives you a dial for one of them.
+[![Release](https://img.shields.io/github/v/release/Rayekkk/DeckyVibranceHDR?style=for-the-badge&label=release&color=C2410C&labelColor=141417)](https://github.com/Rayekkk/DeckyVibranceHDR/releases/latest)
+[![Downloads](https://img.shields.io/github/downloads/Rayekkk/DeckyVibranceHDR/total?style=for-the-badge&label=downloads&color=15803D&labelColor=141417)](https://github.com/Rayekkk/DeckyVibranceHDR/releases)
+[![Device](https://img.shields.io/badge/device-any_gamescope_panel-6E40C9?style=for-the-badge&labelColor=141417)](#requirements)
+[![Requires](https://img.shields.io/badge/requires-Decky_Loader-0969DA?style=for-the-badge&labelColor=141417)](https://decky.xyz)
+[![License](https://img.shields.io/github/license/Rayekkk/DeckyVibranceHDR?style=for-the-badge&label=license&color=424A53&labelColor=141417)](LICENSE)
 
-## SDR
+**Saturation control for both SDR and HDR content under gamescope, in one plugin.**
+Two sliders: one for the Steam interface and ordinary games, one for content actually running in HDR.
 
-`GAMESCOPE_COLOR_SDR_GAMUT_WIDENESS` lerps the source colorimetry between
-Rec.709 at `0.0` and the panel's native gamut at `1.0`. On a wide-gamut panel
-that lerp runs in u'v' and nothing clamps the parameter, so above `1.0` it keeps
-going in the same direction and places the primaries outside the panel. It is a
-single float, and writing it is the whole feature.
+[Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Usage](#usage) · [How it works](#how-it-works) · [Troubleshooting](#troubleshooting)
 
-That is one of two branches, and the other one numbers itself differently:
-`0.0` is native, `0.5` a generic wide gamut with smooth mapping, `1.0` the same
-with harsh mapping - and `cfit()` clamps there. Both are usable. What moves is
-where neutral sits and how much room is above it.
+</div>
 
-So the slider always means the same thing - 100% is neutral, up is more
-saturated - and the mapping underneath follows the panel:
+<!-- Screenshots go here once they exist. Two columns keeps a 16:10 capture
+     from swallowing the page - it renders at half width, so half the height.
 
-| panel | slider | atom | look |
+| | |
+|---|---|
+| ![SDR](docs/panel1.jpeg) | ![HDR](docs/panel2.jpeg) |
+-->
+
+---
+
+## Features
+
+| | |
+|---|---|
+| **Two independent halves** | SDR affects the Steam interface and non-HDR games; HDR affects only games actually running in HDR |
+| **SDR runs 100-300%** | 100% is neutral. The same range on every panel, whatever has to happen underneath to deliver it |
+| **HDR runs 100-150%** | A ceiling set by the maths rather than by gamescope |
+| **Both sliders show their own limit** | Each marks where its range stops being free, so you see it coming rather than walk into it |
+| **It survives a suspend** | gamescope forgets these settings when it re-initialises, so the plugin watches for a resume and puts both halves back |
+| **Everything is restored** | When a half goes off, the plugin unloads, or it is uninstalled, including the value the SDR control held before it was ever touched |
+| **Neither slider goes below 100%** | Both bottom out at neutral |
+| **Built-in panel only** | The plugin stands down while an external display is connected |
+| **The HDR half can be absent** | Not drawn at all on a panel whose EDID never mentions PQ, since it could never take effect there |
+| **A short pause when a slider settles** | Building the HDR lookup table takes about a fifth of a second, so it happens once you stop moving, and the panel says so |
+
+---
+
+## Requirements
+
+| Requirement | Details |
+|---|---|
+| Compositor | gamescope in Game Mode, driving the built-in panel |
+| Plugin loader | [Decky Loader](https://decky.xyz) |
+| Privileges | none, runs as the normal user |
+
+> [!NOTE]
+> **Not tied to one handheld.** Which mapping applies is read from the panel's EDID rather
+> than from the model name, so any display gamescope drives is handled on its own terms.
+> Confirmed on a Legion Go 2 (OLED, wide gamut, HDR) and a Legion Go S (LCD, standard
+> gamut), where the HDR half does not appear at all because the panel never declares PQ.
+
+---
+
+## Installation
+
+**1.** Install [Decky Loader](https://decky.xyz) if you haven't already.
+**2.** Download `DeckyVibranceHDR-x.x.x.zip` from the [Releases](../../releases) page.
+**3.** In Gaming Mode, open the **Quick Access Menu** (the `…` button).
+**4.** Open the Decky menu, scroll to the bottom, then **Developer → Install Plugin from ZIP**.
+**5.** Select the downloaded zip.
+
+<details>
+<summary><b>Building from source</b></summary>
+
+<br>
+
+Requires Node.js 18+.
+
+```bash
+git clone https://github.com/Rayekkk/DeckyVibranceHDR
+cd DeckyVibranceHDR
+
+npm install
+npm run build      # bundles src/index.tsx into dist/
+npm run package    # produces DeckyVibranceHDR-<version>.zip
+```
+
+Then install the resulting zip through Decky's **Install Plugin from ZIP**, which is the
+supported path and avoids permission problems.
+
+</details>
+
+---
+
+## Usage
+
+Open the **Quick Access Menu** and tap the plugin icon. There are two toggles and two
+sliders, one pair per half, and nothing else to configure.
+
+Turning a half off puts back exactly what was there before, so switching between them costs
+nothing.
+
+---
+
+## How it works
+
+gamescope exposes its controls as X11 properties, called *atoms*. Both halves of this plugin
+work by writing to them; what differs is how much gamescope is willing to give.
+
+### SDR
+
+This is the easy half, because a dial already exists. The complication is that it does not
+mean the same thing on every panel, and sorting that out is most of the work.
+
+`GAMESCOPE_COLOR_SDR_GAMUT_WIDENESS` moves the source colorimetry between Rec.709 at `0.0`
+and the panel's native gamut at `1.0`. On a wide-gamut panel that runs in u'v' and nothing
+clamps the parameter, so above `1.0` it keeps going in the same direction and places the
+primaries outside the panel. It is a single float, and writing it is the whole feature.
+
+That is one of two branches gamescope can take. On the other, the same parameter is numbered
+differently: `0.0` is native, `0.5` a generic wide gamut with smooth mapping, `1.0` the same
+with harsh mapping, and gamescope clamps it there. Both are usable. The difference that
+matters is where neutral sits: at `1.0` on the first branch, at `0.0` on the second.
+
+So the slider always means the same thing, 100% is neutral and up is more saturated, while
+the mapping underneath follows the panel:
+
+| Panel | Slider | Atom | Look |
 |---|---|---|---|
-| wide gamut | 100-300% | 1.0-3.0 | never written |
-| standard gamut | 100-300% | 0.0-1.0 over the first 100 points | 1.0-1.5 over the rest |
+| **Wide gamut** | 100-300% | 1.0-3.0 | never written |
+| **Standard gamut** | 100-300% | 0.0-1.0 over the first 100 points | 1.0-1.5 over the rest |
 
-On the standard branch `cfit()` clamps the atom at what the slider calls 200%,
-so past that there is nothing left for it to push. The rest of the range is
-carried by `GAMESCOPE_COLOR_LOOK_G22`, the SDR twin of the atom the HDR half
-uses, generated in the gamma 2.2 domain by the same ICtCp code. The look is
-expressed as a rate rather than a fraction of the range, so moving the top of
-the slider does not quietly change what every setting below it asks for.
+On the standard branch that clamp lands at what the slider calls 200%, so past it there is
+nothing left for the parameter to push. The rest of the range is carried by
+`GAMESCOPE_COLOR_LOOK_G22`, the SDR twin of the slot the HDR half uses, generated in the
+gamma 2.2 domain by the same ICtCp code.
 
-A wide-gamut panel never reaches that: its atom covers the whole slider, and no
-look is written at all.
+A wide-gamut panel never reaches that: its parameter covers the whole slider, and no look is
+written at all.
 
-Which branch applies is decided by gamescope's own `BIsWideGamut()` test - red
-`x > 0.650` and `y < 0.320` - run against the EDID published in
-`GAMESCOPE_DISPLAY_EDID_PATH`. Measured: a Legion Go 2 OLED is 0.6836/0.3154 and
-passes; a Legion Go S LCD is 0.6523/0.3408 and fails on `y` after passing `x` by
-a hair. An EDID that cannot be read falls back to the wide-gamut mapping.
+> [!NOTE]
+> Which branch applies is decided by gamescope's own `BIsWideGamut()` test, red `x > 0.650`
+> and `y < 0.320`, run against the EDID published in `GAMESCOPE_DISPLAY_EDID_PATH`.
+> Measured: a Legion Go 2 OLED is 0.6836/0.3154 and passes; a Legion Go S LCD is
+> 0.6523/0.3408 and fails on `y` after passing `x` by a hair. An EDID that cannot be read
+> falls back to the wide-gamut mapping.
 
-## HDR
+### HDR
 
-There is no equivalent. In `create_color_mgmt_luts()` the PQ path calls
-`buildPQColorimetry()`, which sets the input to BT.2020 and **zeroes the gamut
-remap** — there is deliberately nothing to turn.
+This is the hard half, because there is nothing to turn. In `create_color_mgmt_luts()` the PQ
+path calls `buildPQColorimetry()`, which sets the input to BT.2020 and **zeroes the gamut
+remap**. That is deliberate, not an oversight.
 
-What the PQ path does accept is a *look*: `GAMESCOPE_COLOR_LOOK_PQ` holds a path
-to a `.cube` file that gamescope applies to HDR content only. So this plugin
-generates that file itself.
+What the PQ path does accept is a *look*, gamescope's term for a colour lookup table it
+applies to the image. `GAMESCOPE_COLOR_LOOK_PQ` holds a path to a `.cube` file used for HDR
+content only, so this plugin generates that file itself.
 
-### Why the maths is not trivial
+> [!WARNING]
+> Past about 130% an HDR boost hard-clips channels at the gamut boundary and takes saturated
+> detail with them. That is why the ceiling sits at 150% rather than higher.
 
-The look is applied where it is, not where you would assume. From
-`color_helpers.cpp`:
+<details>
+<summary><b>Why the maths is not trivial</b></summary>
+
+<br>
+
+The look is applied where it is, not where you would assume. From `color_helpers.cpp`:
 
 ```c
 sourceColorEOTFEncoded = ApplyLut3D_Tetrahedral( *pLook, sourceColorEOTFEncoded );
 sourceColorLinear      = calcEOTFToLinear( sourceColorEOTFEncoded, sourceEOTF, ... );
 ```
 
-The LUT runs on values that are still **encoded**, before linearisation and
-before any tonemapping or gamut mapping. On the HDR path that means its domain
-and range are both PQ-encoded BT.2020 in `0..1`.
+The LUT runs on values that are still **encoded**, before linearisation and before any
+tonemapping or gamut mapping. On the HDR path that means its domain and range are both
+PQ-encoded BT.2020 in `0..1`.
 
-PQ is violently non-linear, so scaling distance from grey in place would drag
-lightness and hue around — worst exactly in the bright saturated areas HDR
-exists for. Each LUT entry therefore decodes PQ to linear, converts to **ICtCp**
-(ITU-R BT.2100), scales the two chroma axes and leaves intensity alone, then
-converts back. That operation is what a saturation slider is supposed to be, and
-ICtCp is the space built for it.
+PQ is violently non-linear, so scaling distance from grey in place would drag lightness and
+hue around, worst exactly in the bright saturated areas HDR exists for. Each LUT entry
+therefore decodes PQ to linear, converts to **ICtCp** (ITU-R BT.2100), scales the two chroma
+axes and leaves intensity alone, then converts back. That operation is what a saturation
+slider is supposed to be, and ICtCp is the space built for it.
 
-Black maps to black by construction, which keeps gamescope's
-`bRaisesBlackLevelFloor` false.
+Black maps to black by construction, which keeps gamescope's `bRaisesBlackLevelFloor` false.
 
-## What to expect
+</details>
 
-- **Two independent toggles.** SDR affects the Steam UI and non-HDR games; HDR
-  affects only games actually running in HDR.
-- **Neither slider goes below 100%.** Both bottom out at neutral. Below that the
-  picture is being drained rather than lifted, and that is a different control.
-- **The SDR range is 100–300% either way,** with 100% neutral. What changes with
-  the panel is what carries it — see above.
-- **Only the built-in panel.** An external display is somebody else's panel and
-  every number here was measured against this one, so plugging one in makes the
-  plugin stand down and unplugging it brings the settings back. gamescope says
-  which it is driving in `GAMESCOPE_DISPLAY_IS_EXTERNAL`; the check runs on a
-  timer, so docking is noticed without a restart.
-- **HDR runs 100–150%,** a ceiling set by the maths rather than by gamescope:
-  past about 130% a boost hard-clips channels at the gamut boundary and takes
-  saturated detail with them. Each slider warns you where its own range stops
-  being free rather than pretending it does not.
-- **The HDR section is not drawn at all** when the EDID does not advertise
-  SMPTE ST 2084, since the look sits on the PQ path and could never be reached.
-  That block can appear either in a CTA-861 extension or inside a DisplayID one,
-  so both are searched. Only an EDID that cannot be read at all leaves the
-  section in place: ignorance is not a no, but a complete EDID that never
-  mentions PQ is.
-- **A short pause wherever a LUT is involved.** A 33³ cube takes about a fifth
-  of a second to build, so it is only rebuilt once the slider stops moving. Both
-  halves say so while it happens.
-- **100% loads no LUT at all.** Identity is not worth a file.
-- **It survives a suspend.** gamescope forgets these atoms when it
-  re-initialises, so the plugin watches for a resume — `CLOCK_MONOTONIC` stops
-  while the machine sleeps and `CLOCK_BOOTTIME` does not — and puts both halves
-  back, several times over, because gamescope can clobber them while it starts.
-  A value dropped any other way is restored by the same watch within a few
-  seconds; only a value that keeps being overwritten is reported as a conflict.
-- **Everything is restored** when a toggle goes off, the plugin unloads, or it
-  is uninstalled — including the value the SDR atom held before it was touched.
+### Staying applied
 
-## Conflicts
+gamescope drops these atoms when it re-initialises, so the plugin watches for a resume by
+comparing `CLOCK_MONOTONIC`, which stops while the machine sleeps, against `CLOCK_BOOTTIME`,
+which does not. Both halves then go back several times over, because gamescope can clobber
+them while it is still starting. A value dropped any other way is restored by the same watch
+within a few seconds; only a value that keeps being overwritten is reported as a conflict.
 
-vibrantDeck writes the same SDR atom. Two plugins fighting over one value
-produces behaviour that looks like a bug in both, so this plugin watches for it
-and says so in the panel. Keep one of them enabled, not both.
+---
 
-Its HDR half does not conflict with anything: nothing else uses the PQ look slot.
+## Troubleshooting
 
-## Requirements
+<details>
+<summary><b>The panel says another plugin is fighting for the SDR atom</b></summary>
 
-- gamescope in Game Mode, driving the built-in panel
-- DeckyLoader
+<br>
 
-Runs as the normal user; no root.
+vibrantDeck writes the same `GAMESCOPE_COLOR_SDR_GAMUT_WIDENESS` atom. Two plugins pushing
+one value produces behaviour that looks like a bug in both, so this plugin watches for it
+and says so rather than letting you chase it.
 
-Not tied to one handheld. Which mapping applies is read from the panel's EDID
-rather than from the model name, so any display gamescope drives is handled on
-its own terms. Confirmed on a Legion Go 2 (OLED, wide gamut, HDR) and a Legion
-Go S (LCD, standard gamut), where the HDR section does not appear at all
-because the panel never declares PQ.
+Keep one of them enabled, not both. The HDR half does not conflict with anything, since
+nothing else uses the PQ look slot.
 
-## Installation
+</details>
 
-Download the zip from Releases, then in Decky: gear icon → Developer →
-**Install Plugin from ZIP File**.
+<details>
+<summary><b>There is no HDR half at all</b></summary>
+
+<br>
+
+Expected on a panel whose EDID does not advertise SMPTE ST 2084. The HDR half works by
+handing gamescope a look on the PQ path, and on such a panel that path is never taken, so the
+control would do nothing whatever it was set to.
+
+That block can sit either in a CTA-861 extension or inside a DisplayID one, so both are
+searched. An EDID that cannot be read at all is treated differently and leaves the half in
+place: ignorance is not a no, but a complete EDID that never mentions PQ is.
+
+</details>
+
+<details>
+<summary><b>Nothing happens after plugging in an external display</b></summary>
+
+<br>
+
+Also expected. Every number here was measured against the built-in panel, so the plugin
+stands down while an external display is being driven and brings the settings back when it
+goes away. `GAMESCOPE_DISPLAY_IS_EXTERNAL` is checked on a timer, so docking and undocking
+are noticed without restarting anything.
+
+</details>
+
+---
 
 ## Development
 
-```
+```bash
 npm install
 npm run build        # bundles src/index.tsx into dist/
-npm run typecheck
+npm run typecheck    # TypeScript check with no emit
 npm run package      # builds the installable zip
+
 python -m unittest discover -s tests -v
 ```
 
-`tests/test_logic.py` runs anywhere, including CI. It checks the PQ transfer
-round trip against a 10-bit code value, that unity saturation is exactly
-identity, that black stays black and greys stay neutral, that output never
-leaves the unit cube, and that the `.cube` file has the layout gamescope's
-loader assumes — red changing fastest, which if wrong scrambles the image rather
-than failing loudly.
+`tests/test_logic.py` runs anywhere, including CI. It checks the PQ transfer round trip
+against a 10-bit code value, that unity saturation is exactly identity, that black stays
+black and greys stay neutral, that output never leaves the unit cube, and that the `.cube`
+file has the layout gamescope's loader assumes, red changing fastest, which if wrong
+scrambles the image rather than failing loudly.
 
-## Licence
+`lego_updater.py` is shared verbatim with all my other plugins, change it in one repo and
+copy it to the others.
 
-BSD 3-Clause - see [LICENSE](LICENSE).
+---
+
+## Credits
+
+- [vibrantDeck](https://github.com/libvibrant/vibrantDeck) by Scrumplex, LGPL-3.0 - prior art for the SDR half, no code used; see [NOTICE](NOTICE)
+
+---
+
+## License
+
+BSD 3-Clause - see [LICENSE](LICENSE). Third-party components are listed in [NOTICE](NOTICE).
+
+---
+
+<div align="left">
+
+*Vibe coded with the help of [Claude](https://claude.ai) 🤖*
+
+</div>
