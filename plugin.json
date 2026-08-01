@@ -12,7 +12,7 @@
       "display",
       "color"
     ],
-    "description": "Saturation control for both SDR and HDR content under gamescope. SDR uses gamescope's own gamut wideness dial; HDR has no such dial, so the plugin generates a colour LUT and hands it to gamescope's HDR look slot. The HDR adjustment is computed in ICtCp, so raising saturation does not drag lightness or hue along with it.",
-    "image": ""
+    "description": "Saturation control under gamescope, for HDR content as well as SDR. Works on any panel it can read an EDID from.",
+    "image": "https://raw.githubusercontent.com/Rayekkk/DeckyVibranceHDR/main/docs/logo.png"
   }
 }
