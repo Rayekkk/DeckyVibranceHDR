@@ -152,4 +152,4 @@ than failing loudly.
 
 ## Licence
 
-MIT.
+BSD 3-Clause - see [LICENSE](LICENSE).

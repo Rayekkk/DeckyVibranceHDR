@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026 Rayekkk
+# https://github.com/Rayekkk/DeckyVibranceHDR
+
 """Minimal stand-ins for the two modules DeckyLoader injects at runtime.
 
 Importing main.py outside the loader fails on `import decky` and

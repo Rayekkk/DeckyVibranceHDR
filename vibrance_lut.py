@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026 Rayekkk
+# https://github.com/Rayekkk/DeckyVibranceHDR
+
 """Generates the .cube LUTs gamescope applies as a "look".
 
 Where this sits in gamescope's pipeline matters, because it decides what the

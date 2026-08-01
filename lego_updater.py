@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026 Rayekkk
+# https://github.com/Rayekkk/DeckyVibranceHDR
+
 """Update checks and downloads, shared verbatim between the LeGo plugins.
 
 This file is kept identical in LeGoTDP and LeGo-Vibe-Control. Everything

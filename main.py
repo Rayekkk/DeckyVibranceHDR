@@ -1,3 +1,7 @@
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026 Rayekkk
+# https://github.com/Rayekkk/DeckyVibranceHDR
+
 """DeckyVibranceHDR - saturation control for both SDR and HDR content.
 
 Three gamescope interfaces, picked per display rather than per device.
