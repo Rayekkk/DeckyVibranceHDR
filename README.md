@@ -128,6 +128,12 @@ Its HDR half does not conflict with anything: nothing else uses the PQ look slot
 
 Runs as the normal user; no root.
 
+Not tied to one handheld. Which mapping applies is read from the panel's EDID
+rather than from the model name, so any display gamescope drives is handled on
+its own terms. Confirmed on a Legion Go 2 (OLED, wide gamut, HDR) and a Legion
+Go S (LCD, standard gamut), where the HDR section does not appear at all
+because the panel never declares PQ.
+
 ## Installation
 
 Download the zip from Releases, then in Decky: gear icon → Developer →
