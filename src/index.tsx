@@ -138,7 +138,7 @@ const UpdateSection: FC = () => {
         </PanelSectionRow>
       )}
 
-      {info?.update_available && !downloadPath && (
+      {info?.update_available && info.download_url && info.asset_name && !downloadPath && (
         <PanelSectionRow>
           <ButtonItem layout="below" onClick={download} disabled={downloading}>
             {downloading ? "Downloading..." : `Download v${info.latest_version}`}
@@ -234,6 +234,14 @@ const Content: FC = () => {
         <PanelSection title="Heads up">
           <PanelSectionRow>
             <Field label="Conflict" description={state.conflict} />
+          </PanelSectionRow>
+        </PanelSection>
+      )}
+
+      {state.reason.startsWith("could not") && (
+        <PanelSection title="Could not apply the setting">
+          <PanelSectionRow>
+            <Field label="gamescope write failed" description={state.reason} />
           </PanelSectionRow>
         </PanelSection>
       )}

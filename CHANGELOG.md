@@ -1,5 +1,45 @@
 # Changelog
 
+All notable changes to Decky Vibrance HDR, newest first.
+
+## [1.0.1] - 2026-08-09
+
+### Fixed
+
+- Starting the plugin while an external display is already active no longer
+  applies the built-in panel's SDR value or either look to that display. The
+  saved settings return after switching back to the internal panel.
+- Rapid enable, disable and slider calls can no longer finish out of order and
+  put back a setting that a newer call removed. LUT work is checked again at the
+  point it reaches gamescope, so a build that finishes after disable, unload or
+  docking is discarded instead of restoring the old look.
+- Disabling a look restores the value that was there before the plugin took
+  control. A look owned by another plugin is left alone, and a failed release
+  keeps enough state to retry rather than forgetting what still needs cleanup.
+- A failed LUT replacement no longer loses ownership of the previous working
+  file. The old look remains tracked and can still be released cleanly.
+- The updater offers a download only when the release contains the exact
+  `DeckyVibranceHDR-<version>.zip` asset, instead of accepting a missing or
+  unrelated attachment.
+
+### Changed
+
+- Stable panel identification is cached. Normal monitoring now checks only
+  whether the active display changed instead of repeatedly reading and parsing
+  the same EDID every five seconds.
+- A release failure is shown in the plugin panel instead of being visible only
+  in the backend log.
+- Unload and uninstall stop new LUT writes and wait for any writer already in
+  progress before generated files are removed.
+
+### Internal
+
+- Backend tests up to 118 from 108, covering concurrent mutations, stale LUT
+  workers, look ownership, startup while docked, panel caching and update asset
+  validation.
+- Test files are closed deterministically, allowing the suite to run with Python
+  warnings promoted to errors.
+
 ## 1.0.0
 
 Initial release.

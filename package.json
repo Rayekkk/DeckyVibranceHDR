@@ -1,6 +1,6 @@
 {
   "name": "deckyvibrancehdr",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "DeckyLoader plugin: saturation control for SDR and HDR content under gamescope",
   "license": "BSD-3-Clause",
   "type": "module",

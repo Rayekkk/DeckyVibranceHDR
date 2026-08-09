@@ -8,6 +8,7 @@ import asyncio
 import os
 import struct
 import sys
+import threading
 import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -290,6 +291,204 @@ class Setters(unittest.TestCase):
             main.settings._store.clear()
         self.assertEqual(main.Plugin._state["sdr_saturation"], 1.0)
         self.assertEqual(main.Plugin._state["hdr_saturation"], 1.0)
+
+
+class SerializedMutations(unittest.TestCase):
+    """An older RPC must never commit after a newer toggle has finished."""
+
+    def test_sdr_enable_cannot_overtake_disable(self):
+        calls = []
+        save_started = threading.Event()
+        let_save_finish = threading.Event()
+        save_count = 0
+        result = {}
+        count_lock = threading.Lock()
+        real_save = main.Plugin._save
+        real_apply = main.Plugin._apply_sdr
+        real_release = main.Plugin._release_sdr
+        real_schedule = main.Plugin._schedule_sdr_look
+        real_lock = main.Plugin._mutation_lock
+        saved_state = dict(main.Plugin._state)
+        saved_unloading = main.Plugin._unloading
+
+        def fake_save():
+            nonlocal save_count
+            with count_lock:
+                save_count += 1
+                number = save_count
+            if number == 1:
+                save_started.set()
+                let_save_finish.wait(2)
+
+        def fake_apply():
+            calls.append("apply")
+            main.Plugin._state["sdr_applied"] = True
+
+        def fake_release():
+            calls.append("release")
+            main.Plugin._state["sdr_applied"] = False
+            return True
+
+        async def scenario():
+            plugin = main.Plugin()
+            enabling = asyncio.create_task(plugin.set_sdr_enabled(True))
+            while not save_started.is_set():
+                await asyncio.sleep(0.005)
+            disabling = asyncio.create_task(plugin.set_sdr_enabled(False))
+            await asyncio.sleep(0)
+            self.assertFalse(disabling.done())
+            let_save_finish.set()
+            await asyncio.gather(enabling, disabling)
+            result.update(main.Plugin._state)
+
+        main.Plugin._save = staticmethod(fake_save)
+        main.Plugin._apply_sdr = staticmethod(fake_apply)
+        main.Plugin._release_sdr = staticmethod(fake_release)
+        main.Plugin._schedule_sdr_look = lambda self: None
+        main.Plugin._mutation_lock = asyncio.Lock()
+        main.Plugin._unloading = False
+        main.Plugin._state.update({
+            "external_display": False, "sdr_enabled": False,
+            "sdr_applied": False,
+        })
+        try:
+            asyncio.run(scenario())
+        finally:
+            let_save_finish.set()
+            main.Plugin._save = real_save
+            main.Plugin._apply_sdr = real_apply
+            main.Plugin._release_sdr = real_release
+            main.Plugin._schedule_sdr_look = real_schedule
+            main.Plugin._mutation_lock = real_lock
+            main.Plugin._unloading = saved_unloading
+            main.Plugin._state.update(saved_state)
+        self.assertEqual(calls, ["apply", "release"])
+        self.assertFalse(result["sdr_enabled"])
+        self.assertFalse(result["sdr_applied"])
+
+
+class StaleLookJobs(unittest.TestCase):
+    """A worker may finish its file, but no stale worker may commit an atom."""
+
+    def test_hdr_worker_finishing_after_disable_cannot_restore_the_look(self):
+        build_started = threading.Event()
+        let_build_finish = threading.Event()
+        writes = []
+        result = {}
+        real_build = main._write_look
+        real_write = main._write_string_atom
+        real_read = main._read_string_atom
+        real_debounce = main.DEBOUNCE_S
+        real_lock = main.Plugin._mutation_lock
+        saved_state = dict(main.Plugin._state)
+        saved_unloading = main.Plugin._unloading
+        saved_fields = (main.Plugin._hdr_look_path,
+                        main.Plugin._hdr_look_baseline,
+                        main.Plugin._look_slot,
+                        main.Plugin._hdr_generation)
+
+        def late_build(*_args):
+            build_started.set()
+            let_build_finish.wait(2)
+            return os.path.join(main._runtime_dir(), "hdr-look-1.cube")
+
+        async def scenario():
+            plugin = main.Plugin()
+            plugin._schedule_hdr()
+            worker = main.Plugin._tasks[-1]
+            while not build_started.is_set():
+                await asyncio.sleep(0.005)
+            await plugin.set_hdr_enabled(False)
+            let_build_finish.set()
+            await asyncio.gather(worker, return_exceptions=True)
+            result.update(main.Plugin._state)
+
+        main._write_look = late_build
+        main._write_string_atom = lambda atom, value: (
+            writes.append((atom, value)) or True)
+        main._read_string_atom = lambda atom: None
+        main.DEBOUNCE_S = 0
+        main.Plugin._mutation_lock = asyncio.Lock()
+        main.Plugin._tasks = []
+        main.Plugin._unloading = False
+        main.Plugin._hdr_look_path = None
+        main.Plugin._hdr_look_baseline = None
+        main.Plugin._state.update({
+            "external_display": False, "hdr_enabled": True,
+            "hdr_supported": True, "hdr_saturation": 1.2,
+            "hdr_applied": False,
+        })
+        try:
+            asyncio.run(scenario())
+        finally:
+            let_build_finish.set()
+            main._write_look = real_build
+            main._write_string_atom = real_write
+            main._read_string_atom = real_read
+            main.DEBOUNCE_S = real_debounce
+            main.Plugin._mutation_lock = real_lock
+            main.Plugin._unloading = saved_unloading
+            main.Plugin._tasks = []
+            (main.Plugin._hdr_look_path,
+             main.Plugin._hdr_look_baseline,
+             main.Plugin._look_slot,
+             main.Plugin._hdr_generation) = saved_fields
+            main.Plugin._state.update(saved_state)
+        self.assertFalse(result["hdr_enabled"])
+        self.assertFalse(result["hdr_applied"])
+        self.assertFalse(any(value for _atom, value in writes))
+
+    def test_failed_sdr_replacement_keeps_the_previous_look_owned(self):
+        real_build = main._write_look
+        real_debounce = main.DEBOUNCE_S
+        real_lock = main.Plugin._mutation_lock
+        saved_mapping = (main.SDR_NEUTRAL_ATOM, main.SDR_ATOM_SPAN)
+        saved_state = dict(main.Plugin._state)
+        saved_unloading = main.Plugin._unloading
+        saved_fields = (main.Plugin._sdr_look_path,
+                        main.Plugin._sdr_look_baseline,
+                        main.Plugin._sdr_look_slot,
+                        main.Plugin._sdr_look_generation)
+        old = os.path.join(main._runtime_dir(), "sdr-look-0.cube")
+        result = {}
+
+        async def scenario():
+            plugin = main.Plugin()
+            plugin._schedule_sdr_look()
+            worker = main.Plugin._tasks[-1]
+            await asyncio.gather(worker, return_exceptions=True)
+            result["path"] = main.Plugin._sdr_look_path
+            result["applied"] = main.Plugin._state["sdr_look_applied"]
+
+        main._write_look = lambda *_args: ""
+        main.DEBOUNCE_S = 0
+        main.Plugin._mutation_lock = asyncio.Lock()
+        main.Plugin._tasks = []
+        main.Plugin._unloading = False
+        main.SDR_NEUTRAL_ATOM, main.SDR_ATOM_SPAN = 0.0, 1.0
+        main.Plugin._sdr_look_path = old
+        main.Plugin._sdr_look_baseline = "/tmp/foreign-sdr.cube"
+        main.Plugin._sdr_look_slot = 0
+        main.Plugin._state.update({
+            "external_display": False, "sdr_enabled": True,
+            "sdr_saturation": 2.5, "sdr_look_applied": True,
+        })
+        try:
+            asyncio.run(scenario())
+        finally:
+            main._write_look = real_build
+            main.DEBOUNCE_S = real_debounce
+            main.Plugin._mutation_lock = real_lock
+            main.Plugin._tasks = []
+            main.Plugin._unloading = saved_unloading
+            main.SDR_NEUTRAL_ATOM, main.SDR_ATOM_SPAN = saved_mapping
+            (main.Plugin._sdr_look_path,
+             main.Plugin._sdr_look_baseline,
+             main.Plugin._sdr_look_slot,
+             main.Plugin._sdr_look_generation) = saved_fields
+            main.Plugin._state.update(saved_state)
+        self.assertEqual(result["path"], old)
+        self.assertTrue(result["applied"])
 
 
 class Reassert(unittest.TestCase):
@@ -899,6 +1098,52 @@ class G22Transfer(unittest.TestCase):
         self.assertIn("pq domain", V.generate(1.2, 5))
 
 
+class LookOwnership(unittest.TestCase):
+
+    def setUp(self):
+        self.real_read = main._read_string_atom
+        self.real_write = main._write_string_atom
+        self.saved = (
+            main.Plugin._sdr_look_path, main.Plugin._sdr_look_baseline,
+            main.Plugin._hdr_look_path, main.Plugin._hdr_look_baseline,
+            main.Plugin._state["sdr_look_applied"],
+            main.Plugin._state["hdr_applied"],
+        )
+
+    def tearDown(self):
+        main._read_string_atom = self.real_read
+        main._write_string_atom = self.real_write
+        (main.Plugin._sdr_look_path, main.Plugin._sdr_look_baseline,
+         main.Plugin._hdr_look_path, main.Plugin._hdr_look_baseline,
+         main.Plugin._state["sdr_look_applied"],
+         main.Plugin._state["hdr_applied"]) = self.saved
+
+    def test_release_restores_the_foreign_hdr_baseline(self):
+        own = os.path.join(main._runtime_dir(), "hdr-look-1.cube")
+        foreign = "/tmp/foreign-hdr.cube"
+        writes = []
+        main.Plugin._hdr_look_path = own
+        main.Plugin._hdr_look_baseline = foreign
+        main.Plugin._state["hdr_applied"] = True
+        main._read_string_atom = lambda atom: own
+        main._write_string_atom = lambda atom, value: (
+            writes.append((atom, value)) or True)
+        self.assertTrue(main.Plugin._release_hdr())
+        self.assertEqual(writes, [(main.ATOM_LOOK_PQ, foreign)])
+        self.assertFalse(main.Plugin._state["hdr_applied"])
+
+    def test_failed_clear_keeps_ownership_for_a_retry(self):
+        own = os.path.join(main._runtime_dir(), "sdr-look-1.cube")
+        main.Plugin._sdr_look_path = own
+        main.Plugin._sdr_look_baseline = None
+        main.Plugin._state["sdr_look_applied"] = True
+        main._read_string_atom = lambda atom: own
+        main._write_string_atom = lambda atom, value: False
+        self.assertFalse(main.Plugin._release_sdr_look())
+        self.assertEqual(main.Plugin._sdr_look_path, own)
+        self.assertTrue(main.Plugin._state["sdr_look_applied"])
+
+
 class ReleaseIsReallyOff(unittest.TestCase):
     """Turning the half off has to leave the picture where it was before it was
     ever turned on - on both branches, whose neutral values disagree."""
@@ -947,9 +1192,10 @@ class BaselineCapture(unittest.TestCase):
     def test_our_own_leftover_is_not_mistaken_for_a_baseline(self):
         """Reloading the plugin with the half already on used to capture what we
         wrote last time, so "off" restored our own saturation."""
-        source = open(os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "main.py"), encoding="utf-8").read()
+        with open(os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "main.py"), encoding="utf-8") as source_file:
+            source = source_file.read()
         start = source.index("Remember what was there before")
         window = source[start:start + 1200]
         self.assertIn('if Plugin._state["sdr_enabled"]:', window)
@@ -1051,43 +1297,51 @@ class StartupSettles(unittest.TestCase):
     def test_startup_puts_the_values_back_more_than_once(self):
         """One write into a settling session is not enough; the same ladder the
         resume path uses is what makes it stick."""
-        source = open(os.path.join(
-            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-            "main.py"), encoding="utf-8").read()
+        with open(os.path.join(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                "main.py"), encoding="utf-8") as source_file:
+            source = source_file.read()
         start = source.index("async def _start_when_ready")
         end = source.index("_monitor_loop()", start)
         self.assertIn("_reassert_repeatedly", source[start:end])
 
     def test_a_disabled_half_clears_what_the_last_run_left(self):
         """The look atom outlives a plugin reload, and nothing reloads it into
-        our state - so "off" has to be written, not assumed."""
+        our state - so an owned path has to be cleared, not assumed."""
         cleared = []
-        real_string = main._write_string_atom
+        real_write, real_read = main._write_string_atom, main._read_string_atom
+        path = os.path.join(main._runtime_dir(), "sdr-look-0.cube")
         main._write_string_atom = lambda name, value: (
             cleared.append((name, value)) or True)
+        main._read_string_atom = lambda name: path
         main.Plugin._state["sdr_look_applied"] = True
+        main.Plugin._sdr_look_path = path
         try:
             main.Plugin._release_sdr_look()
         finally:
-            main._write_string_atom = real_string
+            main._write_string_atom, main._read_string_atom = real_write, real_read
+            main.Plugin._sdr_look_path = None
         self.assertEqual(cleared, [(main.ATOM_LOOK_G22, "")])
 
 
 class StartupAssertsOff(unittest.TestCase):
-    """Both look atoms outlive a plugin reload and nothing reloads them into
-    our state, so a half that starts disabled has to say so out loud."""
+    """Startup clears stale paths owned by us, but never somebody else's."""
 
-    def _boot_with(self, sdr_on, hdr_on):
+    def _boot_with(self, sdr_on, hdr_on, own_looks=True):
         written = []
         real = {name: getattr(main, name) for name in
                 ("_pick_display", "_panel_is_wide_gamut", "_panel_supports_hdr",
                  "_read_float_atom", "_write_float_atom", "_write_string_atom",
-                 "_count_gamescope_atoms")}
+                 "_read_string_atom", "_count_gamescope_atoms")}
         real_sleep = asyncio.sleep
         saved_mapping = (main.SDR_NEUTRAL_ATOM, main.SDR_ATOM_SPAN)
         saved_state = {k: main.Plugin._state[k] for k in
                        ("sdr_enabled", "hdr_enabled", "sdr_look_applied",
                         "hdr_applied", "sdr_applied")}
+        saved_looks = (
+            main.Plugin._sdr_look_path, main.Plugin._sdr_look_baseline,
+            main.Plugin._hdr_look_path, main.Plugin._hdr_look_baseline,
+        )
 
         async def no_wait(_seconds):
             return None
@@ -1098,6 +1352,18 @@ class StartupAssertsOff(unittest.TestCase):
         main._read_float_atom = lambda name: 1.0
         main._write_float_atom = lambda name, value: True
         main._count_gamescope_atoms = lambda display: 44
+        own = {
+            main.ATOM_LOOK_G22: os.path.join(
+                main._runtime_dir(), "sdr-look-0.cube"),
+            main.ATOM_LOOK_PQ: os.path.join(
+                main._runtime_dir(), "hdr-look-0.cube"),
+        }
+        foreign = {
+            main.ATOM_LOOK_G22: "/tmp/foreign-sdr.cube",
+            main.ATOM_LOOK_PQ: "/tmp/foreign-hdr.cube",
+        }
+        main._read_string_atom = lambda name: (
+            own if own_looks else foreign).get(name)
         main._write_string_atom = lambda name, value: (
             written.append((name, value)) or True)
         asyncio.sleep = no_wait
@@ -1112,6 +1378,9 @@ class StartupAssertsOff(unittest.TestCase):
             asyncio.sleep = real_sleep
             main.SDR_NEUTRAL_ATOM, main.SDR_ATOM_SPAN = saved_mapping
             main.Plugin._state.update(saved_state)
+            (main.Plugin._sdr_look_path, main.Plugin._sdr_look_baseline,
+             main.Plugin._hdr_look_path,
+             main.Plugin._hdr_look_baseline) = saved_looks
             main.settings._store.clear()
         return written
 
@@ -1127,6 +1396,88 @@ class StartupAssertsOff(unittest.TestCase):
         written = self._boot_with(sdr_on=True, hdr_on=False)
         self.assertNotIn((main.ATOM_LOOK_G22, ""), written)
 
+    def test_foreign_looks_are_not_cleared_on_disabled_startup(self):
+        written = self._boot_with(
+            sdr_on=False, hdr_on=False, own_looks=False)
+        self.assertEqual(written, [])
+
+
+class StartupOnExternalDisplay(unittest.TestCase):
+
+    def test_enabled_settings_do_not_apply_while_already_docked(self):
+        calls = []
+        names = (
+            "_pick_display", "_count_gamescope_atoms", "_read_float_atom",
+            "_read_string_atom", "_write_float_atom", "_write_string_atom",
+            "_display_is_external", "_panel_is_wide_gamut",
+            "_panel_supports_hdr",
+        )
+        real = {name: getattr(main, name) for name in names}
+        real_sleep = asyncio.sleep
+        real_track = main.Plugin._track
+        real_schedule_sdr = main.Plugin._schedule_sdr_look
+        real_schedule_hdr = main.Plugin._schedule_hdr
+        real_apply = main.Plugin._apply_sdr
+        real_lock = main.Plugin._mutation_lock
+        saved_state = dict(main.Plugin._state)
+        saved_unloading = main.Plugin._unloading
+        saved_cache = (main.Plugin._panel_cache_key,
+                       main.Plugin._panel_cache_complete)
+        saved_looks = (
+            main.Plugin._sdr_look_path, main.Plugin._sdr_look_baseline,
+            main.Plugin._hdr_look_path, main.Plugin._hdr_look_baseline,
+        )
+
+        async def no_wait(_seconds):
+            return None
+
+        main._pick_display = lambda: ":0"
+        main._count_gamescope_atoms = lambda display: 44
+        main._read_float_atom = lambda atom: 1.0
+        main._read_string_atom = lambda atom: None
+        main._write_float_atom = lambda atom, value: (
+            calls.append((atom, value)) or True)
+        main._write_string_atom = lambda atom, value: (
+            calls.append((atom, value)) or True)
+        main._display_is_external = lambda: True
+        main._panel_is_wide_gamut = lambda: self.fail(
+            "external panel must not be measured")
+        main._panel_supports_hdr = lambda: self.fail(
+            "external panel must not be measured")
+        main.Plugin._apply_sdr = staticmethod(lambda: calls.append("apply SDR"))
+        main.Plugin._schedule_sdr_look = lambda self: calls.append("schedule SDR")
+        main.Plugin._schedule_hdr = lambda self: calls.append("schedule HDR")
+        main.Plugin._track = staticmethod(lambda task: task.cancel())
+        main.Plugin._mutation_lock = asyncio.Lock()
+        main.Plugin._panel_cache_key = None
+        main.Plugin._panel_cache_complete = False
+        main.Plugin._unloading = False
+        main.Plugin._state.update({
+            "ready": False, "external_display": False,
+            "sdr_enabled": True, "hdr_enabled": True,
+            "hdr_supported": True,
+        })
+        asyncio.sleep = no_wait
+        try:
+            asyncio.run(main.Plugin()._start_when_ready())
+        finally:
+            for name, fn in real.items():
+                setattr(main, name, fn)
+            asyncio.sleep = real_sleep
+            main.Plugin._track = real_track
+            main.Plugin._schedule_sdr_look = real_schedule_sdr
+            main.Plugin._schedule_hdr = real_schedule_hdr
+            main.Plugin._apply_sdr = real_apply
+            main.Plugin._mutation_lock = real_lock
+            main.Plugin._unloading = saved_unloading
+            (main.Plugin._panel_cache_key,
+             main.Plugin._panel_cache_complete) = saved_cache
+            (main.Plugin._sdr_look_path, main.Plugin._sdr_look_baseline,
+             main.Plugin._hdr_look_path,
+             main.Plugin._hdr_look_baseline) = saved_looks
+            main.Plugin._state.update(saved_state)
+        self.assertEqual(calls, [])
+
 
 class ExternalDisplay(unittest.TestCase):
     """Everything here is calibrated against the built-in panel, so anything
@@ -1137,6 +1488,10 @@ class ExternalDisplay(unittest.TestCase):
                       ("external_display", "sdr_max", "hdr_supported",
                        "sdr_enabled", "hdr_enabled")}
         self.saved_mapping = (main.SDR_NEUTRAL_ATOM, main.SDR_ATOM_SPAN)
+        self.saved_cache = (main.Plugin._panel_cache_key,
+                            main.Plugin._panel_cache_complete)
+        main.Plugin._panel_cache_key = None
+        main.Plugin._panel_cache_complete = False
         self.real = {n: getattr(main, n) for n in
                      ("_display_is_external", "_panel_is_wide_gamut",
                       "_panel_supports_hdr")}
@@ -1146,6 +1501,8 @@ class ExternalDisplay(unittest.TestCase):
             setattr(main, name, fn)
         main.Plugin._state.update(self.saved)
         main.SDR_NEUTRAL_ATOM, main.SDR_ATOM_SPAN = self.saved_mapping
+        (main.Plugin._panel_cache_key,
+         main.Plugin._panel_cache_complete) = self.saved_cache
 
     def _configure(self, external):
         main._display_is_external = lambda: external
@@ -1172,6 +1529,17 @@ class ExternalDisplay(unittest.TestCase):
         self.assertTrue(self._configure(external=True))
         self.assertTrue(self._configure(external=False))
 
+    def test_stable_panel_reuses_its_cached_classification(self):
+        calls = []
+        main._display_is_external = lambda: False
+        main._panel_is_wide_gamut = lambda: calls.append("wide") or True
+        main._panel_supports_hdr = lambda: calls.append("hdr") or True
+        main.Plugin._panel_cache_key = None
+        main.Plugin._panel_cache_complete = False
+        main.Plugin._configure_for_panel()
+        main.Plugin._configure_for_panel()
+        self.assertEqual(calls, ["wide", "hdr"])
+
     def test_nothing_is_measured_off_an_external_display(self):
         """Its gamut must not choose our mapping - the numbers were calibrated
         against the built-in panel."""
@@ -1193,3 +1561,38 @@ class ExternalDisplay(unittest.TestCase):
             _drain(main.Plugin().set_sdr_enabled(True))["sdr_enabled"])
         self.assertFalse(
             _drain(main.Plugin().set_hdr_enabled(True))["hdr_enabled"])
+
+
+class UpdateAssetValidation(unittest.TestCase):
+
+    def setUp(self):
+        self.real_check = main.updater.check
+
+    def tearDown(self):
+        main.updater.check = self.real_check
+
+    def test_update_without_the_expected_zip_is_not_downloadable(self):
+        main.updater.check = lambda: {
+            "current_version": "1.0.0",
+            "latest_version": "2.0.0",
+            "update_available": True,
+            "download_url": "https://example.invalid/source.zip",
+            "asset_name": "source.zip",
+        }
+        info = asyncio.run(main.Plugin().check_for_updates())
+        self.assertIsNone(info["download_url"])
+        self.assertIsNone(info["asset_name"])
+        self.assertIn("DeckyVibranceHDR-2.0.0.zip", info["error"])
+
+    def test_exact_release_zip_remains_downloadable(self):
+        expected = "DeckyVibranceHDR-2.0.0.zip"
+        main.updater.check = lambda: {
+            "current_version": "1.0.0",
+            "latest_version": "2.0.0",
+            "update_available": True,
+            "download_url": f"https://example.invalid/{expected}",
+            "asset_name": expected,
+        }
+        info = asyncio.run(main.Plugin().check_for_updates())
+        self.assertNotIn("error", info)
+        self.assertEqual(info["asset_name"], expected)
