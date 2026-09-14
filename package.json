@@ -1,6 +1,6 @@
 {
   "name": "deckyvibrancehdr",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "DeckyLoader plugin: saturation control for SDR and HDR content under gamescope",
   "license": "BSD-3-Clause",
   "type": "module",
@@ -8,7 +8,8 @@
     "build": "rollup -c",
     "watch": "rollup -c -w",
     "typecheck": "tsc --noEmit",
-    "package": "node scripts/package.mjs"
+    "package": "node scripts/package.mjs",
+    "test": "node --test tests/state-sync.test.mjs"
   },
   "devDependencies": {
     "@decky/api": "^1.1.3",

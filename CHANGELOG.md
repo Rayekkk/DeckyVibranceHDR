@@ -2,6 +2,40 @@
 
 All notable changes to Decky Vibrance HDR, newest first.
 
+## [1.0.2] - 2026-09-14
+
+### Fixed
+
+- Failed HDR and SDR look builds or replacements are retried by the monitor.
+  Requested saturation is tracked separately from the last successful LUT, so
+  an older working file no longer counts as a completed slider change.
+- SDR, SDR look and HDR errors are kept independently. A successful operation
+  on one control no longer hides another control's failed apply or reset.
+- Each SDR enable captures the current baseline before taking control. Enabling
+  again after a failed release preserves the original baseline instead of
+  capturing the plugin's own value.
+- Missing SDR properties and failed initial SDR writes are retried. A missing
+  property is recreated only after confirming gamescope is still reachable.
+- Frontend mutations are serialized, pending edits remain visible, and outdated
+  polling responses cannot overwrite newer slider values.
+- The standard-gamut SDR look above 200% converts gamescope's generic source
+  gamut to BT.2020 for ICtCp and back before clipping. Native white from EDID is
+  adapted to D65; unreadable white metadata falls back to D65.
+
+### Changed
+
+- HDR status shows the saturation of the last LUT successfully sent, without
+  claiming gamescope has confirmed loading it.
+- Added backend recovery and colorimetry regressions, plus frontend state tests
+  run by `npm test` and CI: 131 backend tests and 6 frontend tests.
+
+### Validation
+
+- Confirmed on Legion Go 2: SDR slider changes, SDR and HDR disable/enable,
+  HDR saturation changes, suspend/resume, and external-display docking/undocking.
+- The standard-gamut SDR look is covered by numerical regression tests; the
+  Legion Go 2 wide-gamut panel does not use that path.
+
 ## [1.0.1] - 2026-08-09
 
 ### Fixed

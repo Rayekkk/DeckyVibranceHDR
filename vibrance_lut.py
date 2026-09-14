@@ -14,7 +14,7 @@ does:
 So the look is applied to values that are still *encoded*, before linearisation
 and before any tonemapping or gamut mapping. Which transfer they are encoded in
 depends on the path: PQ for HDR content, gamma 2.2 for SDR. Both are supported
-here; the encoding argument picks between them and nothing else changes.
+here; the encoding argument selects the transfer and source gamut.
 
 That means a saturation LUT cannot just scale distance from grey in place: both
 transfers are non-linear, so doing that shifts luminance and hue - badly and
@@ -28,9 +28,16 @@ operation "a saturation slider" is supposed to be. Scaling Ct and Cp is the
 whole adjustment; I is untouched. The PQ inside ICtCp is part of ICtCp and stays
 put whichever transfer the look itself sits behind.
 
+The G22 look also converts gamescope's generic wide-gamut source primaries to
+BT.2020 before ICtCp, then back before clipping. Its native white is adapted to
+D65 so a neutral input remains neutral on panels with a different white point.
+
 Black maps to black by construction, which keeps gamescope's
 bRaisesBlackLevelFloor false (it drives cv_overlay_unmultiplied_alpha).
 """
+
+from functools import lru_cache
+import math
 
 # ── PQ (SMPTE ST 2084) ─────────────────────────────────────────────────────────
 # Absolute, with 1.0 encoded meaning 10000 nits.
@@ -138,6 +145,47 @@ def _mul3(m, v):
     )
 
 
+D65 = (0.3127, 0.3290)
+# gamescope color_helpers.h: displaycolorimetry_widegamutgeneric. This is the
+# G22 source once the standard-gamut SDR atom has reached its ceiling of 1.0.
+G22_PRIMARIES = ((0.6825, 0.3165), (0.241, 0.719), (0.138, 0.050))
+BT2020_PRIMARIES = ((0.708, 0.292), (0.170, 0.797), (0.131, 0.046))
+_BRADFORD = ((0.8951, 0.2664, -0.1614),
+             (-0.7502, 1.7135, 0.0367),
+             (0.0389, -0.0685, 1.0296))
+
+
+def _matmul(a, b):
+    return tuple(tuple(sum(x * y for x, y in zip(row, col))
+                       for col in zip(*b)) for row in a)
+
+
+def _white_xyz(white):
+    x, y = white
+    if not (math.isfinite(x) and math.isfinite(y)
+            and x > 0.0 and y > 0.0 and x + y <= 1.0):
+        raise ValueError("invalid source white point")
+    return (x / y, 1.0, (1.0 - x - y) / y)
+
+
+def _rgb_to_xyz(primaries, white):
+    unscaled = tuple(zip(*(_white_xyz(p) for p in primaries)))
+    scale = _mul3(_invert3(unscaled), _white_xyz(white))
+    return tuple(tuple(row[j] * scale[j] for j in range(3)) for row in unscaled)
+
+
+@lru_cache(maxsize=16)
+def _g22_matrices(source_white):
+    source_lms = _mul3(_BRADFORD, _white_xyz(source_white))
+    dest_lms = _mul3(_BRADFORD, _white_xyz(D65))
+    scaled = tuple(tuple(row[j] * dest_lms[i] / source_lms[i]
+                         for j in range(3)) for i, row in enumerate(_BRADFORD))
+    adaptation = _matmul(_invert3(_BRADFORD), scaled)
+    to_2020 = _matmul(_invert3(_rgb_to_xyz(BT2020_PRIMARIES, D65)),
+                      _matmul(adaptation, _rgb_to_xyz(G22_PRIMARIES, source_white)))
+    return to_2020, _invert3(to_2020)
+
+
 # Which transfer the encoded values arriving at the look are using. Only the
 # outer pair changes; the PQ inside ICtCp is part of ICtCp and stays put.
 TRANSFERS = {
@@ -146,7 +194,8 @@ TRANSFERS = {
 }
 
 
-def saturate(rgb_encoded, saturation: float, encoding: str = "pq"):
+def saturate(rgb_encoded, saturation: float, encoding: str = "pq",
+             source_white=D65):
     """One LUT entry, in and out in whichever transfer the look sits behind."""
     if saturation == 1.0:
         return rgb_encoded
@@ -156,6 +205,9 @@ def saturate(rgb_encoded, saturation: float, encoding: str = "pq"):
         raise ValueError(f"unknown encoding {encoding!r}") from None
 
     linear = tuple(decode(c) for c in rgb_encoded)
+    if encoding == "g22":
+        to_2020, from_2020 = _g22_matrices(tuple(source_white))
+        linear = _mul3(to_2020, linear)
     lms = _mul3(_RGB_TO_LMS, linear)
     # Negative LMS can only come from out-of-gamut input; PQ is undefined there.
     lms_pq = tuple(linear_to_pq(max(c, 0.0)) for c in lms)
@@ -167,6 +219,8 @@ def saturate(rgb_encoded, saturation: float, encoding: str = "pq"):
     lms_pq = _mul3(_ICTCP_TO_LMS, (i, ct, cp))
     lms = tuple(pq_to_linear(max(c, 0.0)) for c in lms_pq)
     linear = _mul3(_LMS_TO_RGB, lms)
+    if encoding == "g22":
+        linear = _mul3(from_2020, linear)
 
     # Clamp after the round trip: raising saturation pushes colours outside the
     # cube, and gamescope's tetrahedral interpolation expects 0..1. The ceiling
@@ -175,7 +229,8 @@ def saturate(rgb_encoded, saturation: float, encoding: str = "pq"):
     return tuple(encode(min(max(c, 0.0), ceiling)) for c in linear)
 
 
-def generate(saturation: float, size: int = 33, encoding: str = "pq") -> str:
+def generate(saturation: float, size: int = 33, encoding: str = "pq",
+             source_white=D65) -> str:
     """A complete .cube file as text. R changes fastest, as gamescope expects."""
     if not 2 <= size <= 128:
         raise ValueError("gamescope accepts LUT_3D_SIZE between 2 and 128")
@@ -194,6 +249,7 @@ def generate(saturation: float, size: int = 33, encoding: str = "pq") -> str:
     for b in range(size):
         for g in range(size):
             for r in range(size):
-                v = saturate((r * step, g * step, b * step), saturation, encoding)
+                v = saturate((r * step, g * step, b * step), saturation, encoding,
+                             source_white)
                 out.append("%.6f %.6f %.6f" % v)
     return "\n".join(out) + "\n"

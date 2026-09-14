@@ -34,7 +34,7 @@ Two sliders: one for the Steam interface and ordinary games, one for content act
 | **HDR runs 100-150%** | A ceiling set by the maths rather than by gamescope |
 | **Both sliders show their own limit** | Each marks where its range stops being free, so you see it coming rather than walk into it |
 | **It survives a suspend** | gamescope forgets these settings when it re-initialises, so the plugin watches for a resume and puts both halves back |
-| **Everything is restored** | When a half goes off, the plugin unloads, or it is uninstalled, including the value the SDR control held before it was ever touched |
+| **Settings are restored** | Turning a half off restores its captured baseline; failed restores remain visible and are retried while the plugin is running |
 | **Neither slider goes below 100%** | Both bottom out at neutral |
 | **Built-in panel only** | The plugin stands down while an external display is connected |
 | **The HDR half can be absent** | Not drawn at all on a panel whose EDID never mentions PQ, since it could never take effect there |
@@ -94,8 +94,13 @@ supported path and avoids permission problems.
 Open the **Quick Access Menu** and tap the plugin icon. There are two toggles and two
 sliders, one pair per half, and nothing else to configure.
 
-Turning a half off puts back exactly what was there before, so switching between them costs
-nothing.
+Turning a half off restores the settings captured when it took control. SDR captures the
+current value on each enable. If SDR was already enabled at plugin startup and the old
+baseline is unknown, disabling it returns gamescope to its native-gamut default.
+
+Failed changes are retried automatically. SDR and HDR keep separate error messages, and the
+HDR status shows the last LUT successfully sent, which can differ from the requested slider
+value while a retry is pending. Sending a LUT is not confirmation that gamescope loaded it.
 
 ---
 
@@ -131,6 +136,11 @@ On the standard branch that clamp lands at what the slider calls 200%, so past i
 nothing left for the parameter to push. The rest of the range is carried by
 `GAMESCOPE_COLOR_LOOK_G22`, the SDR twin of the slot the HDR half uses, generated in the
 gamma 2.2 domain by the same ICtCp code.
+
+That look converts gamescope's generic wide-gamut source to BT.2020 before ICtCp and back
+afterwards. The panel's white point is read from EDID and adapted to D65 during the
+adjustment, with D65 as the fallback when white metadata is unavailable. This preserves
+intensity and chroma direction before the final clipping step.
 
 A wide-gamut panel never reaches that: its parameter covers the whole slider, and no look is
 written at all.
@@ -243,6 +253,7 @@ are noticed without restarting anything.
 npm install
 npm run build        # bundles src/index.tsx into dist/
 npm run typecheck    # TypeScript check with no emit
+npm test             # frontend ordering and optimistic-state regressions
 npm run package      # builds the installable zip
 
 python -m unittest discover -s tests -v
@@ -253,6 +264,10 @@ against a 10-bit code value, that unity saturation is exactly identity, that bla
 black and greys stay neutral, that output never leaves the unit cube, and that the `.cube`
 file has the layout gamescope's loader assumes, red changing fastest, which if wrong
 scrambles the image rather than failing loudly.
+
+`tests/test_recovery.py` additionally exercises failed applies and resets, baseline
+recapture, missing SDR properties and the SDR source-gamut conversion. These are host-side
+tests; they do not replace checking color output, suspend/resume and docking on a handheld.
 
 `lego_updater.py` is shared verbatim with all my other plugins, change it in one repo and
 copy it to the others.

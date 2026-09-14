@@ -13,7 +13,8 @@ import {
   staticClasses,
   ToggleField,
 } from "@decky/ui";
-import { FC, useCallback, useEffect, useState } from "react";
+import { FC, useCallback, useEffect, useMemo, useState } from "react";
+import { createStateSync } from "./stateSync";
 
 interface State {
   ready: boolean;
@@ -24,6 +25,10 @@ interface State {
   hdr_saturation: number;
   sdr_applied: boolean;
   hdr_applied: boolean;
+  hdr_applied_saturation: number | null;
+  sdr_error: string;
+  sdr_look_error: string;
+  hdr_error: string;
   generating: boolean;
   conflict: string;
   external_display: boolean;
@@ -173,33 +178,22 @@ const Content: FC = () => {
   const visible = useQuickAccessVisible();
   const [state, setState] = useState<State | null>(null);
 
-  const refresh = useCallback(async () => {
-    try {
-      setState(await getState());
-    } catch {
-      /* backend not up yet */
-    }
-  }, []);
+  const sync = useMemo(() => createStateSync<State>(getState, setState,
+    (error) => notify("Setting failed", String(error))), []);
 
   useEffect(() => {
-    refresh();
-    if (!visible) return;
-    const id = setInterval(refresh, 1000);
-    return () => clearInterval(id);
-  }, [visible, refresh]);
+    sync.activate();
+    void sync.refresh();
+    const id = visible ? setInterval(() => void sync.refresh(), 1000) : undefined;
+    return () => { clearInterval(id); sync.deactivate(); };
+  }, [visible, sync]);
 
   // Slider moves are applied optimistically so the control stays responsive;
   // the backend is what decides the value that actually lands.
   const push = useCallback(
-    async <T,>(fn: (v: T) => Promise<State>, key: keyof State, value: T) => {
-      setState((s) => (s ? { ...s, [key]: value } : s));
-      try {
-        setState(await fn(value));
-      } catch {
-        refresh();
-      }
-    },
-    [refresh],
+    <K extends keyof State>(fn: (v: State[K]) => Promise<State>, key: K, value: State[K]) =>
+      sync.mutate(key, value, () => fn(value)),
+    [sync],
   );
 
   if (!state) {
@@ -238,11 +232,17 @@ const Content: FC = () => {
         </PanelSection>
       )}
 
-      {state.reason.startsWith("could not") && (
+      {(state.sdr_error || state.sdr_look_error || state.hdr_error) && (
         <PanelSection title="Could not apply the setting">
-          <PanelSectionRow>
-            <Field label="gamescope write failed" description={state.reason} />
-          </PanelSectionRow>
+          {state.sdr_error && <PanelSectionRow>
+            <Field label="SDR" description={state.sdr_error} />
+          </PanelSectionRow>}
+          {state.sdr_look_error && <PanelSectionRow>
+            <Field label="SDR look" description={state.sdr_look_error} />
+          </PanelSectionRow>}
+          {state.hdr_error && <PanelSectionRow>
+            <Field label="HDR" description={state.hdr_error} />
+          </PanelSectionRow>}
         </PanelSection>
       )}
 
@@ -348,9 +348,11 @@ const Content: FC = () => {
                 description={
                   state.generating
                     ? "building the LUT..."
-                    : state.hdr_applied
-                      ? "LUT loaded by gamescope"
-                      : "no LUT loaded (100% needs none)"
+                    : state.hdr_applied_saturation !== null
+                      ? `Last LUT sent: ${pct(state.hdr_applied_saturation)}`
+                      : state.hdr_saturation === 1
+                        ? "100% needs no LUT"
+                        : "Waiting to apply the HDR setting"
                 }
                 focusable
               >
