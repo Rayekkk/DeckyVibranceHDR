@@ -40,7 +40,7 @@ from collections import OrderedDict
 import math
 import threading
 
-# â”€â”€ PQ (SMPTE ST 2084) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── PQ (SMPTE ST 2084) ─────────────────────────────────────────────────────────
 # Absolute, with 1.0 encoded meaning 10000 nits.
 
 _M1 = 2610.0 / 16384.0
@@ -77,7 +77,7 @@ def linear_to_pq(y: float) -> float:
     return ((_C1 + _C2 * ym) / (1.0 + _C3 * ym)) ** _M2
 
 
-# â”€â”€ Gamma 2.2, for the SDR look â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── Gamma 2.2, for the SDR look ────────────────────────────────────────────────
 # The same look mechanism exists on the SDR path as GAMESCOPE_COLOR_LOOK_G22, and
 # it sits in the same place in the pipeline - but there sourceEOTF is Gamma22, so
 # the domain is gamma-encoded and *relative*, not absolute like PQ.
@@ -106,7 +106,7 @@ def linear_to_g22(y: float) -> float:
     return (y * (10000.0 / SDR_REFERENCE_NITS)) ** (1.0 / _GAMMA)
 
 
-# â”€â”€ ICtCp (ITU-R BT.2100) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── ICtCp (ITU-R BT.2100) ──────────────────────────────────────────────────────
 # BT.2020 linear RGB -> LMS, then PQ on LMS, then the ICtCp matrix.
 
 _RGB_TO_LMS = (
@@ -320,3 +320,12 @@ def generate(saturation: float, size: int = 33, encoding: str = "pq",
                                  saturation, encoding, source_white, transform))
                 out.append("%.6f %.6f %.6f" % v)
     return "\n".join(out) + "\n"
+
+
+if __name__ == "__main__":
+    import sys
+    sys.stdout.reconfigure(newline="\n")
+    if len(sys.argv) != 6:
+        raise SystemExit("expected saturation, size, encoding, white x, white y")
+    sys.stdout.write(generate(float(sys.argv[1]), int(sys.argv[2]), sys.argv[3],
+                              (float(sys.argv[4]), float(sys.argv[5]))))

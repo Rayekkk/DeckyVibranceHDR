@@ -31,6 +31,7 @@ import os
 import shutil
 import struct
 import subprocess
+import sys
 import threading
 import tempfile
 import time
@@ -260,7 +261,7 @@ def _setting(key, default):
         return default
 
 
-# â”€â”€ talking to gamescope â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── talking to gamescope ───────────────────────────────────────────────────────
 
 # Steam exports LD_LIBRARY_PATH pointing at its own bundled libraries and the
 # plugin inherits it, so a system binary spawned from here can load Steam's copy
@@ -275,6 +276,15 @@ def _system_env(**extra) -> dict:
     env["DISPLAY"] = DISPLAY
     env.update(extra)
     return env
+
+
+def _run_xprop(command, **kwargs):
+    if _native_lut_python() is not None:
+        # Absolute host path plus inheritable-FD policy enables posix_spawn,
+        # avoiding a fork of the large emulated Decky process on every atom.
+        command = ["/proc/self/root/usr/bin/xprop", *command[1:]]
+        kwargs["close_fds"] = False
+    return subprocess.run(command, **kwargs)
 
 
 def _float_to_cardinal(value: float) -> int:
@@ -295,7 +305,7 @@ def _cardinal_to_float(raw):
 def _read_int_atom(name: str):
     """A plain CARDINAL, not one of the floats gamescope bit-casts."""
     try:
-        out = subprocess.run(
+        out = _run_xprop(
             ["xprop", "-root", name],
             capture_output=True, text=True, timeout=_xprop_timeout, env=_system_env(),
         ).stdout
@@ -326,7 +336,7 @@ def _display_is_external():
 
 def _read_float_atom(name: str):
     try:
-        out = subprocess.run(
+        out = _run_xprop(
             ["xprop", "-root", name],
             capture_output=True, text=True, timeout=_xprop_timeout, env=_system_env(),
         ).stdout
@@ -342,7 +352,7 @@ def _read_float_atom(name: str):
 
 def _write_float_atom(name: str, value: float) -> bool:
     try:
-        subprocess.run(
+        _run_xprop(
             ["xprop", "-root", "-f", name, "32c",
              "-set", name, str(_float_to_cardinal(value))],
             capture_output=True, timeout=_xprop_timeout, env=_system_env(), check=True,
@@ -355,7 +365,7 @@ def _write_float_atom(name: str, value: float) -> bool:
 def _write_string_atom(name: str, value: str) -> bool:
     """UTF8_STRING, matching what gamescope writes for its own path atoms."""
     try:
-        subprocess.run(
+        _run_xprop(
             ["xprop", "-root", "-f", name, "8u", "-set", name, value],
             capture_output=True, timeout=_xprop_timeout, env=_system_env(), check=True,
         )
@@ -366,7 +376,7 @@ def _write_string_atom(name: str, value: str) -> bool:
 
 def _read_string_atom(name: str):
     try:
-        out = subprocess.run(
+        out = _run_xprop(
             ["xprop", "-root", name],
             capture_output=True, text=True, timeout=_xprop_timeout, env=_system_env(),
         ).stdout
@@ -595,7 +605,7 @@ def _panel_is_wide_gamut(blob=_UNREAD_EDID):
 
 def _read_root_properties(display: str):
     try:
-        return subprocess.run(
+        return _run_xprop(
             ["xprop", "-root"],
             capture_output=True, text=True, timeout=_xprop_timeout,
             env=_system_env(DISPLAY=display),
@@ -655,7 +665,7 @@ def _other_writer_present() -> bool:
         if candidate == DISPLAY:
             continue
         try:
-            out = subprocess.run(
+            out = _run_xprop(
                 ["xprop", "-root", ATOM_SDR_WIDENESS],
                 capture_output=True, text=True, timeout=3,
                 env=_system_env(DISPLAY=candidate),
@@ -667,7 +677,7 @@ def _other_writer_present() -> bool:
     return False
 
 
-# â”€â”€ the HDR look â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+# ── the HDR look ───────────────────────────────────────────────────────────────
 
 def _runtime_dir() -> str:
     path = (os.environ.get("DECKY_PLUGIN_RUNTIME_DIR")
@@ -691,6 +701,67 @@ def _sdr_split(value: float):
     remainder = max(0.0, above - SDR_ATOM_SPAN)
     look = min(1.0 + remainder * SDR_LOOK_PER_UNIT, SDR_LOOK_CEILING)
     return SDR_NEUTRAL_ATOM + on_atom, look
+
+
+def _native_lut_python():
+    """Use ARM Python when Decky's frozen interpreter runs under x86 emulation."""
+    try:
+        with open("/proc/self/root/usr/bin/python3", "rb") as f:
+            native = f.read(20)
+        with open(sys.executable, "rb") as f:
+            loader = f.read(20)
+        if (native[:5] == b"\x7fELF\x02" and native[5] == 1
+                and int.from_bytes(native[18:20], "little") == 183
+                and loader[:5] == b"\x7fELF\x02" and loader[5] == 1
+                and int.from_bytes(loader[18:20], "little") == 62):
+            return "/proc/self/root/usr/bin/python3"
+    except OSError:
+        pass
+    return None
+
+
+def _generate_lut(saturation, size, encoding, source_white, cancelled):
+    interpreter = _native_lut_python()
+    if interpreter is None:
+        return vibrance_lut.generate(saturation, size, encoding, source_white,
+                                    cancelled=cancelled)
+    # Preserve validation before converting arguments to CLI strings.
+    if not isinstance(size, int) or isinstance(size, bool) or not 2 <= size <= 128:
+        raise ValueError("gamescope accepts LUT_3D_SIZE between 2 and 128")
+    vibrance_lut.saturate((0, 0, 0), saturation, encoding, source_white)
+    if encoding == "g22":
+        vibrance_lut._white_xyz(source_white)
+    if cancelled() or _lut_writes_disabled:
+        raise vibrance_lut.BuildCancelled()
+    env = _system_env()
+    # PyInstaller's library path must not reach the system Python.
+    env.pop("PYTHONHOME", None)
+    env.pop("PYTHONPATH", None)
+    with subprocess.Popen(
+            [interpreter, "-I", os.path.realpath(vibrance_lut.__file__),
+             repr(saturation), str(size), encoding,
+             repr(source_white[0]), repr(source_white[1])],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
+            close_fds=(os.name == "nt")) as worker:
+        deadline = time.monotonic() + 30
+        try:
+            while True:
+                if cancelled() or _lut_writes_disabled:
+                    raise vibrance_lut.BuildCancelled()
+                if time.monotonic() >= deadline:
+                    raise ValueError("native LUT worker timed out")
+                try:
+                    output, error = worker.communicate(timeout=0.05)
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+            if worker.returncode:
+                raise ValueError("native LUT worker failed: " + error.decode(errors="replace")[:300])
+            return output.decode("utf-8")
+        finally:
+            if worker.poll() is None:
+                worker.kill()
+                worker.communicate()
 
 
 def _write_look(saturation: float, slot: int,
@@ -722,8 +793,8 @@ def _write_look(saturation: float, slot: int,
                     return ""
                 _look_file_cache.move_to_end(path)
                 return path
-            text = vibrance_lut.generate(
-                saturation, LUT_SIZE, encoding, source_white, cancelled=cancelled)
+            text = _generate_lut(
+                saturation, LUT_SIZE, encoding, source_white, cancelled)
             if _lut_writes_disabled or cancelled():
                 return ""
             with open(tmp, "w") as f:
@@ -831,7 +902,7 @@ class Plugin:
     _reassert_generation = 0
     _resume_event = None
 
-    # â”€â”€ exported â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── exported ───────────────────────────────────────────────────────────────
 
     async def get_state(self) -> dict:
         return dict(Plugin._state)
@@ -969,7 +1040,7 @@ class Plugin:
             await _offload(Plugin._release_hdr)
             return dict(Plugin._state)
 
-    # â”€â”€ internals â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── internals ──────────────────────────────────────────────────────────────
 
     @staticmethod
     def _set_error(component: str, message: str = "") -> None:
@@ -1891,6 +1962,8 @@ class Plugin:
         Plugin._unloading = False
         Plugin._settings_loaded = False
         _xprop_timeout = 3.0
+        worker = _native_lut_python() or "in-process"
+        decky.logger.info(f"{LOG} LUT worker: {worker}")
         await _offload(_wait_for_lut_writer)
         if Plugin._unloading:
             return
