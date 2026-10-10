@@ -185,8 +185,8 @@ PQ-encoded BT.2020 in `0..1`.
 PQ is violently non-linear, so scaling distance from grey in place would drag lightness and
 hue around, worst exactly in the bright saturated areas HDR exists for. Each LUT entry
 therefore decodes PQ to linear, converts to **ICtCp** (ITU-R BT.2100), scales the two chroma
-axes and leaves intensity alone, then converts back. That operation is what a saturation
-slider is supposed to be, and ICtCp is the space built for it.
+axes and leaves ICtCp intensity and chroma direction alone, then converts back.
+Clipping at the gamut boundary can still change perceived lightness or hue.
 
 Black maps to black by construction, which keeps gamescope's `bRaisesBlackLevelFloor` false.
 
@@ -250,11 +250,13 @@ are noticed without restarting anything.
 ## Development
 
 ```bash
-npm install
+npm ci
 npm run build        # bundles src/index.tsx into dist/
 npm run typecheck    # TypeScript check with no emit
 npm test             # frontend ordering and optimistic-state regressions
-npm run package      # builds the installable zip
+npm run package      # rebuilds frontend and creates the installable zip
+npm run verify:package # checks ZIP contents and the built Decky API contract
+npm audit --audit-level=low
 
 python -m unittest discover -s tests -v
 ```
@@ -269,8 +271,71 @@ scrambles the image rather than failing loudly.
 recapture, missing SDR properties and the SDR source-gamut conversion. These are host-side
 tests; they do not replace checking color output, suspend/resume and docking on a handheld.
 
-`lego_updater.py` is shared verbatim with all my other plugins, change it in one repo and
-copy it to the others.
+`tests/test_audit_regressions.py` covers coalesced/cancelled LUT work, atomic settings,
+disk failures, unload flush, session rediscovery, EDID validation and safe downloads.
+`tests/test_full_audit.py` covers EDID replacement at a stable path, SDR restore values
+through panel changes, inactive LUT slots, slow HTTP bodies, escaped filenames and
+ZIP verification with optimized Python. Panel metadata is probed outside the control
+lock, so slow reads do not block slider mutations. Unchanged EDID files remain cached.
+`tests/test_quality_round3.py` covers other-server probe latency, shutdown probe
+timeouts, accepted saturation persistence, SemVer precedence and quoted XDG paths.
+Other X server probes run outside the control lock. During unload, gamescope
+reachability and property operations share the shortened timeout.
+`tests/test_quality_round4.py` covers redundant slider values, retries without
+value changes, uninterrupted equivalent builds, overlapping update checks and
+foreign LUT changes during replacement, monitoring and resume. An unchanged
+healthy slider value does not save or reapply; failed settings and applies can
+still be retried. Newly observed foreign LUTs are remembered before replacing
+or reasserting the plugin's look, so disable/reset restores the latest baseline.
+`tests/test_quality_round5.py` covers slow settings writes, generation-aware save
+acknowledgements, unload behind an older write, single-query panel monitoring and
+completed LUT reuse through SDR/HDR RPCs. Ordinary settings saves use immutable
+snapshots outside the control lock, so disk latency does not delay disable/reset
+or subsequent slider requests. The UI reports persistence failures on its next
+state refresh, and unload waits for the final settings write. Panel monitoring
+uses one root-property dump for session health and display metadata.
+`tests/test_quality_round6.py` covers failed reasserts, pending neutral clears,
+independent production LUT hashes, malformed ZIP names and X session recovery.
+The backend retains restore values while rediscovering gamescope and preserves
+them when the local X socket identity matches. A replaced socket, even at the
+same DISPLAY, starts fresh ownership. Restore checks a known socket identity
+immediately, including before the next monitor tick; a disconnected unidentified server cannot
+receive a retained restore. Healthy LUTs survive a same-session reconnect without
+rebuilding, while a changed panel configuration rebuilds the SDR look. Reassert
+failures are reported, and retries respect a pending neutral request.
+`tests/test_quality_round7.py` covers unload during startup's writer wait, TLS
+setup and settings read. Shutdown preserves settings that startup has not yet
+loaded; completing an interrupted startup cannot reenable LUT writes or launch
+new background tasks. Once settings are loaded, shutdown still flushes edits.
+The frontend queues one write at a time, coalesces unsent slider changes and repeated
+toggle intents, and gives disable/reset priority. Reset also removes older unsent
+toggles. Slow reads are retried with a visible connection error; a slow
+write is shown as pending and retains ordering until Decky reports its result.
+
+The LUT keeps its 33³ grid. A bounded cache holds two input ICtCp grids, keyed by transfer
+and source white, so repeated saturation changes reuse the invariant part of the transform.
+The two HDR and two SDR files also retain their completed LUTs. Returning to a
+previous value can reuse the requested inactive slot if its parameters and file
+identity still match. Four metadata records bound this cache; it stores no LUT
+text in memory. New values still use the existing debounce and full-resolution build.
+Transfer functions handle their own lower boundary, avoiding duplicate clamps
+at every LUT node. Independent full-size hashes protect clipping and white-point
+adaptation, and comparison with the prechange generator retains identical bytes.
+Run `python scripts/benchmark_lut.py` for host timing, or add `--reference-ref <commit>`
+to compare byte-for-byte output and paired timings with a local Git revision.
+
+`lego_updater.py` originated in the author's other plugins. Audit fixes in this checkout
+are maintained separately. The ZIP includes the exact @decky/api library source and
+licence under `third_party/decky-api/`; React and @decky/ui use Decky's host globals.
+Update HTTP bodies are read incrementally with time and size checks between reads.
+Each socket idle wait is limited to five seconds; release metadata is limited to 1 MiB
+and the installable ZIP to 32 MiB. Network setup and the final blocking read can extend
+the elapsed time beyond the body deadline.
+Release comparison follows SemVer precedence, retaining prerelease and build
+suffixes in ZIP names. XDG download paths support quoted escapes and literal dollars;
+invalid or unreadable configuration falls back to the host user's Downloads folder.
+When update checks overlap across panel openings, only the newest check can
+authorize its advertised ZIP for download.
 
 ---
 
@@ -291,3 +356,16 @@ BSD 3-Clause - see [LICENSE](LICENSE). Third-party components are listed in [NOT
 *Vibe coded with the help of [Claude](https://claude.ai) 🤖*
 
 </div>
+
+### Armada on ARM devices
+
+When Decky runs as an x86-64 executable under FEX on an ARM system, the plugin
+uses the native system Python for LUT calculation and native xprop through
+posix_spawn. It detects this case from executable ELF architecture headers;
+ordinary x86-64 SteamOS retains its existing execution path. No LUT resolution
+or color math is changed. Obsolete native workers are killed and reaped.
+
+On Odin 3, measured end-to-end saturation updates took about 0.57-0.59 seconds
+for HDR and 0.66-0.69 seconds for SDR, including debounce. Disabling during an
+active build took 41 ms for HDR and 121 ms for SDR. These are device measurements,
+not worst-case guarantees. See [the device validation report](docs/FIX_ARMADA_RESPONSIVENESS_2026-10-10.md).
