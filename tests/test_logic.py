@@ -1218,7 +1218,34 @@ class BaselineCapture(unittest.TestCase):
         self.assertIn("Plugin._sdr_baseline = None", window)
 
 
-class StartupRetry(unittest.TestCase):
+class IsolatedStartup(unittest.TestCase):
+    """Startup fixtures must never adopt atoms from the developer's live display."""
+
+    def setUp(self):
+        from unittest.mock import patch
+        state = dict(main.Plugin._state)
+        state.update(sdr_applied=False, sdr_look_applied=False, hdr_applied=False)
+        patches = [(main, "_read_string_atom", lambda _name: None),
+                   (main, "_read_float_atom", lambda _name: 1.0),
+                   (main, "_write_string_atom", lambda *_args: True),
+                   (main, "_write_float_atom", lambda *_args: True),
+                   (main, "_display_is_external", lambda: False),
+                   (main, "_display_session_identity", lambda: None),
+                   (main.Plugin, "_state", state),
+                   (main.Plugin, "_session_identity", None),
+                   (main.Plugin, "_disconnected", False),
+                   (main.Plugin, "_settings_loaded", True),
+                   (main.Plugin, "_sdr_look_path", None),
+                   (main.Plugin, "_hdr_look_path", None),
+                   (main.Plugin, "_sdr_look_baseline", None),
+                   (main.Plugin, "_hdr_look_baseline", None)]
+        for obj, name, value in patches:
+            item = patch.object(obj, name, value)
+            item.start()
+            self.addCleanup(item.stop)
+
+
+class StartupRetry(IsolatedStartup):
     """Decky starts plugins as a system service and can win the race against
     the session; giving up permanently meant a reinstall to recover."""
 
@@ -1263,7 +1290,7 @@ class StartupRetry(unittest.TestCase):
         self.assertTrue(main.Plugin._state["ready"])
 
 
-class StartupSettles(unittest.TestCase):
+class StartupSettles(IsolatedStartup):
     """gamescope publishes its atoms as it comes up. Writing into a half-built
     session gets thrown away when it finishes, which showed up as a Legion Go S
     coming back from a restart with the atom applied and the look missing -
@@ -1344,7 +1371,7 @@ class StartupSettles(unittest.TestCase):
         self.assertEqual(cleared, [(main.ATOM_LOOK_G22, "")])
 
 
-class StartupAssertsOff(unittest.TestCase):
+class StartupAssertsOff(IsolatedStartup):
     """Startup clears stale paths owned by us, but never somebody else's."""
 
     def _boot_with(self, sdr_on, hdr_on, own_looks=True):

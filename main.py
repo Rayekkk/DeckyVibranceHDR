@@ -30,6 +30,7 @@ import re
 import os
 import shutil
 import struct
+import stat
 import subprocess
 import sys
 import threading
@@ -210,7 +211,26 @@ DEFAULT_SETTINGS = {
     "hdr_saturation": SAT_DEFAULT,
 }
 
-settings = SettingsManager(
+# Decky's manager creates an empty file on first install and suppresses read
+# errors. Record absence before construction so an existing damaged file is
+# never mistaken for a fresh installation.
+try:
+    os.stat(os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json"))
+    _settings_new = False
+except FileNotFoundError:
+    _settings_new = True
+except OSError:
+    _settings_new = False
+
+class _DeferredSettingsManager(SettingsManager):
+    def read(self):
+        # Decky's constructor calls read() for existing files. Defer that
+        # blocking, error-suppressing read until _main can validate the file
+        # and report/retry failures through _read_settings.
+        pass
+
+
+settings = _DeferredSettingsManager(
     name="settings",
     settings_directory=decky.DECKY_PLUGIN_SETTINGS_DIR,
 )
@@ -225,6 +245,36 @@ _look_file_cache = OrderedDict()
 _lut_writes_disabled = False
 _xprop_timeout = 3.0
 UNLOAD_XPROP_TIMEOUT_S = 0.25
+
+
+def _read_settings():
+    global _settings_new
+    path = getattr(settings, "path", None)
+    if path is None:
+        settings.read()
+        return
+    with _settings_lock:
+        descriptor = None
+        try:
+            descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                                 | getattr(os, "O_CLOEXEC", 0))
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ValueError("settings must be a regular file")
+            with os.fdopen(descriptor, encoding="utf-8") as source:
+                descriptor = None
+                text = source.read()
+        except FileNotFoundError:
+            if not _settings_new:
+                raise
+            text = ""
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+        values = {} if _settings_new and not text.strip() else json.loads(text)
+        if not isinstance(values, dict):
+            raise ValueError("settings must contain a JSON object")
+        settings.settings = values
+        _settings_new = False
 
 
 def _offload(fn, *args):
@@ -418,15 +468,27 @@ def _edid_red_primary(blob: bytes):
 
 
 def _read_edid(path=None):
-    """The EDID gamescope publishes for the current output, or None."""
+    """Read regular EDID metadata without waiting for a FIFO/device producer."""
     path = path or _read_string_atom(ATOM_EDID_PATH)
     if not path:
         return None
+    descriptor = None
     try:
-        with open(path, "rb") as f:
-            return f.read(128 * 256 + 1)
+        # Opening before fstat avoids a stat/open race; O_NONBLOCK prevents an
+        # atom pointing to a named pipe from freezing startup or monitoring.
+        # Follow regular-file symlinks, including normal sysfs EDID paths.
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0)
+                             | getattr(os, "O_CLOEXEC", 0))
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            return None
+        with os.fdopen(descriptor, "rb") as source:
+            descriptor = None  # fdopen owns and closes it from here.
+            return source.read(128 * 256 + 1)
     except OSError:
         return None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
 
 
 def _file_identity(path):
@@ -934,6 +996,8 @@ class Plugin:
         async with Plugin._mutation_lock:
             if Plugin._unloading:
                 return dict(Plugin._state)
+            if not Plugin._settings_loaded:
+                raise RuntimeError("settings have not loaded; retry after startup")
             if saturation is not None:
                 Plugin._state["sdr_saturation"] = saturation
             if enabled and (Plugin._unloading
@@ -965,6 +1029,8 @@ class Plugin:
         async with Plugin._mutation_lock:
             if Plugin._unloading:
                 return dict(Plugin._state)
+            if not Plugin._settings_loaded:
+                raise RuntimeError("settings have not loaded; retry after startup")
             if saturation is not None:
                 Plugin._state["hdr_saturation"] = saturation
             if enabled and (Plugin._unloading
@@ -987,6 +1053,8 @@ class Plugin:
         async with Plugin._mutation_lock:
             if Plugin._unloading:
                 return dict(Plugin._state)
+            if not Plugin._settings_loaded:
+                raise RuntimeError("settings have not loaded; retry after startup")
             value = _clamp(value, SDR_MIN, Plugin._state["sdr_max"])
             changed = value != Plugin._state["sdr_saturation"]
             Plugin._state["sdr_saturation"] = value
@@ -1012,6 +1080,8 @@ class Plugin:
         async with Plugin._mutation_lock:
             if Plugin._unloading:
                 return dict(Plugin._state)
+            if not Plugin._settings_loaded:
+                raise RuntimeError("settings have not loaded; retry after startup")
             value = _clamp(value, HDR_MIN, HDR_MAX)
             changed = value != Plugin._state["hdr_saturation"]
             Plugin._state["hdr_saturation"] = value
@@ -1029,6 +1099,8 @@ class Plugin:
         async with Plugin._mutation_lock:
             if Plugin._unloading:
                 return dict(Plugin._state)
+            if not Plugin._settings_loaded:
+                raise RuntimeError("settings have not loaded; retry after startup")
             Plugin._state["sdr_saturation"] = SAT_DEFAULT
             Plugin._state["hdr_saturation"] = SAT_DEFAULT
             Plugin._state["sdr_enabled"] = False
@@ -1054,6 +1126,8 @@ class Plugin:
     @staticmethod
     def _save(values=None) -> None:
         with _settings_lock:
+            if not Plugin._settings_loaded:
+                raise RuntimeError("settings have not loaded; refusing to overwrite the saved file")
             snapshot = dict(settings.settings) if isinstance(settings.settings, dict) else {}
             snapshot.update(values if values is not None else
                             {key: Plugin._state[key] for key in DEFAULT_SETTINGS})
@@ -1091,7 +1165,7 @@ class Plugin:
             else:
                 Plugin._save(values)
             return ""
-        except (OSError, ValueError, TypeError) as exc:
+        except (OSError, ValueError, TypeError, RuntimeError) as exc:
             decky.logger.error(f"{LOG} settings save failed: {exc}")
             return f"could not save settings: {exc}"
 
@@ -1100,11 +1174,15 @@ class Plugin:
         # Unload is the synchronous durability barrier. It holds the mutation
         # lock and accepts no more edits; the writer lock also drains an older
         # disk snapshot before this final one replaces it.
+        if not Plugin._settings_loaded:
+            return
         error = Plugin._write_settings()
         Plugin._settings_dirty = bool(error)
         Plugin._set_error("settings", error)
 
     def _schedule_save(self):
+        if not Plugin._settings_loaded:
+            return
         Plugin._settings_dirty = True
         Plugin._save_generation += 1
         token = Plugin._save_generation
@@ -1961,6 +2039,7 @@ class Plugin:
         decky.logger.info(f"{LOG} startup v{updater.plugin_version()}")
         Plugin._unloading = False
         Plugin._settings_loaded = False
+        Plugin._settings_dirty = False
         _xprop_timeout = 3.0
         worker = _native_lut_python() or "in-process"
         decky.logger.info(f"{LOG} LUT worker: {worker}")
@@ -1984,12 +2063,22 @@ class Plugin:
             decky.logger.warning(f"{LOG} update checks unavailable: {e}")
         if Plugin._unloading:
             return
-        try:
-            await _offload(settings.read)
-        except Exception:
-            pass
+        while not Plugin._unloading:
+            try:
+                await _offload(_read_settings)
+                break
+            except Exception as exc:
+                # Defaults are not a safe replacement for a file we could not
+                # read. Keep the file intact and recover from transient I/O.
+                message = f"could not load settings: {exc}"
+                Plugin._state["reason"] = message
+                Plugin._state["settings_error"] = message
+                decky.logger.warning(f"{LOG} {message}")
+                await asyncio.sleep(1.0)
         if Plugin._unloading:
             return
+        Plugin._state["settings_error"] = ""
+        Plugin._state["reason"] = "starting up"
         for key, fallback in DEFAULT_SETTINGS.items():
             Plugin._state[key] = _setting(key, fallback)
         # Settings written by an older build can sit outside the current range.
@@ -2149,7 +2238,7 @@ class Plugin:
             # Flush desired values even when a debounce has not run yet.
             # Before startup has read the file, the class defaults are not a
             # snapshot of user settings. A quick unload must leave it intact.
-            if Plugin._settings_loaded or Plugin._settings_dirty:
+            if Plugin._settings_loaded:
                 await _offload(Plugin._persist)
         decky.logger.info(f"{LOG} unloaded")
 

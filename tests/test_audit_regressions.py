@@ -202,6 +202,11 @@ class Persistence(unittest.IsolatedAsyncioTestCase):
 
 
 class AtomicSettings(unittest.TestCase):
+    def setUp(self):
+        loaded = patch.object(M.Plugin, "_settings_loaded", True)
+        loaded.start()
+        self.addCleanup(loaded.stop)
+
     def test_nonroot_save_does_not_require_chown_privileges(self):
         with tempfile.TemporaryDirectory() as folder:
             path = os.path.join(folder, "settings.json")

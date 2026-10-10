@@ -39,7 +39,7 @@ class StartupShutdown(unittest.IsolatedAsyncioTestCase):
             store.read = read
             self.mock(M, "settings", store)
             blocked = {"writer": M._wait_for_lut_writer,
-                       "tls": M.updater.ssl_context, "settings": read}[phase]
+                       "tls": M.updater.ssl_context, "settings": M._read_settings}[phase]
             real_offload = M._offload
             async def offload(fn, *args):
                 if fn is blocked:

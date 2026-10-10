@@ -63,3 +63,16 @@ class NativeLut(unittest.TestCase):
         with patch.object(M, "_native_lut_python", return_value="native"), patch.object(M.subprocess, "run") as run:
             M._run_xprop(["xprop", "-root", "ATOM"], timeout=3)
             run.assert_called_once_with(["/proc/self/root/usr/bin/xprop", "-root", "ATOM"], timeout=3, close_fds=False)
+
+    def test_native_worker_deadline_kills_and_reaps_instead_of_hanging(self):
+        worker = MagicMock()
+        worker.__enter__.return_value = worker
+        worker.poll.return_value = None
+        with patch.object(M, "_native_lut_python", return_value=sys.executable), \
+                patch.object(M, "_lut_writes_disabled", False), \
+                patch.object(M.subprocess, "Popen", return_value=worker), \
+                patch.object(M.time, "monotonic", side_effect=[0, 31]):
+            with self.assertRaisesRegex(ValueError, "worker timed out"):
+                M._generate_lut(1.2, 33, "pq", V.D65, lambda: False)
+        worker.kill.assert_called_once()
+        worker.communicate.assert_called_once_with()
