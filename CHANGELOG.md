@@ -2,90 +2,60 @@
 
 All notable changes to Decky Vibrance HDR, newest first.
 
-## [1.0.3] - Unreleased
+## [1.1.0] - 2026-10-10
 
 ### Fixed
 
-- Preserve unread settings when unload interrupts startup; late completion of
-  writer/TLS/settings initialization cannot reenable LUT writes or start tasks
-  after shutdown. Normal shutdown still flushes accepted edits.
-- Call zero-argument backend reads without the implicit Promise callback value;
-  JSON encoding turned that value into a positional null and Decky rejected
-  get_state, leaving the panel on "Backend unavailable - python exception".
-- Coalesce unsent slider RPCs and prioritize disable/reset; preserve optimistic
-  values across stale replies and QAM reopenings. Stop queued RPCs on plugin
-  disposal. Poll one request at a time and show connection errors.
-- Coalesce repeated unsent toggles and resets. Reset cancels obsolete toggle
-  intents as well as sliders, while later controls and generic RPC side effects
-  retain their ordering.
-- Bound LUT workers and interrupt obsolete builds before publication, including
-  jobs waiting for the file lock. Flush pending settings on unload.
-- Save all settings in one atomic snapshot, validate stored/RPC values, and keep
-  restore/reset functional when persistence fails. Retry dirty settings separately.
-- Write settings snapshots outside the control lock, including toggles and reset;
-  slow fsync no longer delays restoring the display or subsequent RPCs. Only the
-  latest generation acknowledges persistence, and unload flushes the final values.
-- Rediscover gamescope after a lost session, including HDR-only configurations,
-  and reconfigure the panel before applying. Reject zero-atom startup and release
-  unsupported HDR looks. Separate same-server and other-server conflict tracking.
-  Coalesce resume ladders and shorten unavailable-server waits during unload.
-- Preserve owned settings and foreign restore values across a transient probe
-  failure on the same X socket. Detect replacement at the same DISPLAY, defer
-  old restores on a different/unidentified server and avoid healthy LUT rebuilds
-  on reconnect. Rebuild SDR when reconnect changes panel configuration.
-- Probe other X servers outside the control lock; include gamescope reachability
-  probes in the shortened unload timeout. Save accepted saturation values when
-  the panel temporarily prevents enabling the control.
-- Skip redundant saves, SDR writes and LUT rebuilds for an unchanged healthy
-  slider value; retain retries after failed applies or saves and keep an
-  equivalent build already in flight.
-- Validate EDID headers, checksums and data boundaries; scan every PQ declaration.
-  Read one EDID per panel classification and invalidate cache when its path or
-  file identity changes. Probe panel metadata outside the mutation lock.
-- Preserve SDR restore values across metadata refreshes and recapture them when
-  returning to the internal panel. Choose an inactive LUT slot before generating.
-- Remember newly observed foreign LUTs before replacing or reasserting an owned
-  look, so disable/reset restores the latest foreign value. Dropped atoms and
-  the plugin's own stale slots do not replace that restore value.
-- Report failed LUT reasserts and retry them. Successful reassertion of an older
-  look does not hide a failed replacement; a pending neutral request clears the
-  plugin's old look instead of reasserting it after resume or an atom drop.
-- Decode xprop path escapes, including UTF-8 octal bytes, and reject embedded NUL.
-- Select the exact release ZIP, validate every HTTPS redirect and checked asset,
-  preserve previous downloads on failure, and validate archives before replacing them.
-  Use Decky's actual host user and avoid unnecessary privileged ownership changes.
-  Read HTTP bodies incrementally, check time/size limits between reads and bound
-  release metadata to 1 MiB.
-- Reject ZIP entry names truncated by an embedded NUL before replacing a download.
-- Compare releases using SemVer prerelease precedence and ignore build metadata
-  for ordering. Preserve the complete release version in asset names. Decode
-  quoted XDG download paths without expanding escaped literal dollars.
-- Ignore superseded update checks when authorizing downloads, including checks
-  started by a panel that has since closed.
-- Rebuild before packaging, remove stale frontend output, preserve the old ZIP
-  on packaging failure, and include @decky/api licensing and corresponding source.
-  Keep runtime files when checkout ancestors resemble cache directory names and
-  enforce ZIP validation even when Python optimization is enabled.
+#### Controls and menu
 
-### Performance and validation
+- Fixed the "Backend unavailable - python exception" message that could prevent
+  the plugin menu from working.
+- Sliders now keep your latest selection instead of jumping back to an older
+  value. Closing and reopening the menu no longer brings back outdated changes.
+- Rapid slider moves and repeated toggles no longer create a long queue of work.
+  Turning an effect off or resetting settings cancels changes you no longer want.
+- Connection problems and failed changes are shown more clearly, and the plugin
+  retries operations that could not be completed.
 
-- On ARM hosts running Decky x86-64 through FEX, build LUTs with native Python
-  and launch native xprop through posix_spawn. Cancel and reap obsolete workers;
-  keep the existing generator and process-launch path on ordinary SteamOS.
-  Odin 3 measurements: HDR 0.57-0.59 s, SDR 0.66-0.69 s; disabling during a
-  build takes 41 ms HDR / 121 ms SDR. LUT mathematics and resolution are unchanged.
-- Cache two invariant 33³ ICtCp input grids, with the source white and transfer in
-  the key. Retain the original node values, file precision and grid resolution.
-- Remove redundant lower clamps already handled by transfer functions, reducing
-  LUT generation work while retaining byte-identical reference output.
-- Reuse an unchanged completed LUT in the requested inactive slot when returning
-  to its saturation. Keep only four metadata records; changed parameters, edited
-  or missing files and cancelled requests cannot reuse an invalid slot.
-- Reuse one root-property dump for monitor health and panel classification,
-  eliminating two redundant xprop processes from an internal-panel check.
-- Replace unused build preset plugins to remove vulnerable glob dependencies;
-  add dependency auditing, backend/frontend regressions and ZIP validation to CI.
-- Build once during CI packaging instead of running the frontend build twice.
+#### Settings and display recovery
+
+- Settings are saved more reliably, including when Decky stops during startup.
+  Slow or failed saves no longer hold up the controls or prevent a reset.
+- Improved recovery after sleep, temporary display connection problems and
+  changes between the built-in screen and an external monitor.
+- Improved detection of the panel's color capabilities and HDR support.
+- Disabling the plugin restores the previous display settings more reliably,
+  including when another tool has changed them while the plugin was active.
+- Returning saturation to neutral no longer leaves an older color effect active.
+
+#### Updates and installation
+
+- Improved update detection, including preview versions, and made downloads
+  more reliable on slow connections.
+- Added stricter checks for update files. Failed downloads or packaging attempts
+  preserve the previous usable file.
+- Fixed handling of download folders and filenames containing special characters.
+
+### Performance improvements
+
+- Much faster controls on Armada devices running Decky through emulation.
+  On Odin 3, measured saturation changes took about **0.6 seconds for HDR** and
+  **0.7 seconds for SDR**. Turning an effect off during a build took **41–121 ms**.
+  Results may vary by device and workload; ordinary SteamOS keeps its existing
+  execution path.
+- Faster color-LUT generation and reuse of recent results when returning to a
+  previous saturation value. LUT resolution and color calculations are unchanged.
+- Fewer repeated display checks, unnecessary saves and rebuilds, leaving more
+  room for the controls to respond to your next change.
+
+### Build and quality checks
+
+- Updated build dependencies, expanded automated tests and improved checks for
+  the installable ZIP. Packages always include a freshly built menu.
+- Added the required license and source files for the bundled Decky API library.
+- Validated with **275 automated tests**, build and package checks, and device
+  checks on SteamOS and Armada. These checks do not replace testing every game
+  or display setup.
 
 ## [1.0.2] - 2026-09-14
 

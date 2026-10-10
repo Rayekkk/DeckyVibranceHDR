@@ -229,8 +229,8 @@ class ReleaseVerifier(unittest.TestCase):
         verifier = Path(__file__).resolve().parent.parent / "scripts" / "verify_package.py"
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            (root / "plugin.json").write_text(json.dumps({"version": "1.0.3"}))
-            with zipfile.ZipFile(root / "DeckyVibranceHDR-1.0.3.zip", "w") as archive:
+            (root / "plugin.json").write_text(json.dumps({"version": "1.1.0"}))
+            with zipfile.ZipFile(root / "DeckyVibranceHDR-1.1.0.zip", "w") as archive:
                 archive.writestr("outside-the-plugin", "invalid")
                 archive.writestr("DeckyVibranceHDR/package.json", '{"version":"wrong"}')
                 archive.writestr("DeckyVibranceHDR/third_party/decky-api/LICENSE", "not a licence")

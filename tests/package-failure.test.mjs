@@ -13,7 +13,7 @@ test("a cache-like checkout directory name cannot filter runtime files", () => {
     mkdirSync(join(folder, "dist"));
     cpSync(new URL("../scripts/package.mjs", import.meta.url), join(folder, "scripts/package.mjs"));
     for (const name of ["plugin.json", "package.json"])
-      writeFileSync(join(folder, name), JSON.stringify({ version: "1.0.3" }));
+      writeFileSync(join(folder, name), JSON.stringify({ version: "1.1.0" }));
     for (const name of ["main.py", "vibrance_lut.py", "lego_updater.py", "dist/index.js"])
       writeFileSync(join(folder, name), "placeholder");
     const result = spawnSync(process.execPath, [join(folder, "scripts/package.mjs")], { encoding: "utf8" });
@@ -34,11 +34,11 @@ test("packaging failure keeps an already created release ZIP", () => {
     mkdirSync(join(folder, "scripts"));
     mkdirSync(join(folder, "dist"));
     cpSync(new URL("../scripts/package.mjs", import.meta.url), join(folder, "scripts/package.mjs"));
-    writeFileSync(join(folder, "plugin.json"), JSON.stringify({ version: "1.0.3" }));
-    writeFileSync(join(folder, "package.json"), JSON.stringify({ version: "1.0.3" }));
+    writeFileSync(join(folder, "plugin.json"), JSON.stringify({ version: "1.1.0" }));
+    writeFileSync(join(folder, "package.json"), JSON.stringify({ version: "1.1.0" }));
     for (const name of ["main.py", "vibrance_lut.py", "lego_updater.py", "dist/index.js"])
       writeFileSync(join(folder, name), "placeholder");
-    const zip = join(folder, "DeckyVibranceHDR-1.0.3.zip");
+    const zip = join(folder, "DeckyVibranceHDR-1.1.0.zip");
     writeFileSync(zip, "previous archive");
     const result = spawnSync(process.execPath, [join(folder, "scripts/package.mjs")], { encoding: "utf8" });
     assert.equal(result.status, 1);
