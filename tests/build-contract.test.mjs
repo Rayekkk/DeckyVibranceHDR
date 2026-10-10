@@ -29,6 +29,7 @@ test("built frontend connects to Decky using host globals and manifest", async (
     sdr_min: 1, sdr_max: 3, sdr_soft_limit: 2, hdr_min: 1, hdr_max: 1.5, hdr_soft_limit: 1.3 };
   const calls = [], reads = [];
   let releaseCheck, releaseDownload;
+  let downloadError = "";
   const checkReply = new Promise(resolve => { releaseCheck = resolve; });
   const downloadReply = new Promise(resolve => { releaseDownload = resolve; });
   let releaseSlider;
@@ -47,7 +48,7 @@ test("built frontend connects to Decky using host globals and manifest", async (
         if (route === "check_for_updates") { await checkReply; return {
           current_version: manifest.version, latest_version: "9.0.0", update_available: true,
           download_url: "https://github.com/release.zip", asset_name: "release.zip" }; }
-        if (route === "perform_update") { await downloadReply; return { success: true, path: "/Downloads/release.zip" }; }
+        if (route === "perform_update") { await downloadReply; if (downloadError) throw Error(downloadError); return { success: true, path: "/Downloads/release.zip" }; }
         if (route === "set_sdr_saturation") { await sliderReply; backend.sdr_saturation = args[0]; }
         if (route === "set_sdr_enabled") { backend.sdr_enabled = args[0]; backend.sdr_saturation = args[1]; }
         if (route === "reset") backend = { ...backend, sdr_enabled: false, hdr_enabled: false,
@@ -90,6 +91,14 @@ test("built frontend connects to Decky using host globals and manifest", async (
     assert.deepEqual(calls.at(-1), ["reset"]);
     assert.equal(states[0].hdr_enabled, false);
     assert.equal(states[0].hdr_saturation, 1);
+    backend = { ...backend, ready: false, reason: "could not load settings: invalid JSON",
+      settings_error: "could not load settings: invalid JSON" };
+    await toggle.props.onChange(false);
+    const blocked = nodes(render()).filter(node => node.type === "Field");
+    assert.ok(blocked.some(node => node.props.label === "Could not load settings"));
+    assert.ok(blocked.every(node => !String(node.props.description).includes("only works in Game Mode")));
+    backend = { ...backend, ready: true, reason: "ready", settings_error: "" };
+    await toggle.props.onChange(false);
     const updateComponent = nodes(render()).find(node => typeof node.type === "function" && node.type.name === "UpdateSection");
     assert.ok(updateComponent);
     for (const cleanup of cleanups) cleanup?.();
@@ -100,16 +109,58 @@ test("built frontend connects to Decky using host globals and manifest", async (
     const checking = check.props.onClick();
     await check.props.onClick();
     assert.equal(calls.filter(call => call[0] === "check_for_updates").length, 1);
+    const remountUpdates = async () => {
+      for (const cleanup of cleanups) cleanup?.();
+      for (const values of [states, refs, effects, cleanups]) values.length = 0;
+      renderUpdates(); await settle();
+    };
+    await remountUpdates();
+    const resumedCheck = nodes(renderUpdates()).find(node => node.props?.children === "Checking...");
+    assert.ok(resumedCheck, "a reopened updater must retain its pending check");
+    await resumedCheck.props.onClick();
+    assert.equal(calls.filter(call => call[0] === "check_for_updates").length, 1);
     releaseCheck(); await checking; await settle();
     const download = nodes(renderUpdates()).find(node => node.props?.children === "Download v9.0.0");
     const downloading = download.props.onClick();
     await download.props.onClick();
     assert.equal(calls.filter(call => call[0] === "perform_update").length, 1);
+    await remountUpdates();
+    const resumedDownload = nodes(renderUpdates()).find(node => node.props?.children === "Downloading...");
+    assert.ok(resumedDownload, "a reopened updater must retain its pending download");
+    await resumedDownload.props.onClick();
+    assert.equal(calls.filter(call => call[0] === "perform_update").length, 1);
     for (const cleanup of cleanups) cleanup?.();
     const beforeUnmountedReply = structuredClone(states);
     releaseDownload(); await downloading; await settle();
     assert.deepEqual(states, beforeUnmountedReply, "an unmounted updater must ignore the download reply");
+    await remountUpdates();
+    const completed = nodes(renderUpdates()).find(node => node.props?.label === "Downloaded");
+    assert.ok(completed?.props.description.includes("/Downloads/release.zip"),
+      "a download that finished with the panel closed must be visible after reopening");
+    const oldCallCount = calls.length;
+    await check.props.onClick();
+    await download.props.onClick();
+    assert.equal(calls.length, oldCallCount, "handlers from a closed updater must not start new RPCs");
+    const freshCheck = nodes(renderUpdates()).find(node => node.props?.children === "Check for updates");
+    await freshCheck.props.onClick(); await settle();
+    const retryDownload = nodes(renderUpdates()).find(node => node.props?.children === "Download v9.0.0");
+    downloadError = "temporary network error";
+    const failedDownload = retryDownload.props.onClick();
+    for (const cleanup of cleanups) cleanup?.();
+    const closedState = structuredClone(states);
+    await failedDownload; await settle();
+    assert.deepEqual(states, closedState, "a closed panel must not receive error state updates");
+    await remountUpdates();
+    const failure = nodes(renderUpdates()).find(node => node.props?.label === "Error");
+    assert.equal(failure?.props.description, "temporary network error",
+      "a download failure while closed must remain visible after reopening");
+    assert.equal(calls.filter(call => call[0] === "get_version").length, 1,
+      "reopening must share its cached installed version");
+    const afterDispose = nodes(renderUpdates()).find(node => node.props?.children === "Check for updates");
     plugin.onDismount();
+    const disposedCallCount = calls.length;
+    await afterDispose.props.onClick();
+    assert.equal(calls.length, disposedCallCount);
   } finally {
     for (const cleanup of cleanups) cleanup?.();
     for (const key of ["SP_REACT", "SP_JSX", "DFL", "window"]) delete globalThis[key];

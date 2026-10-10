@@ -48,14 +48,17 @@ export function createStateSync<T extends object>(
     if (reading) return reading;
     const started = epoch;
     let timer: ReturnType<typeof setTimeout>;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error("Backend read timed out")), readTimeoutMs);
+    // Decky retains unresolved calls and replays them on reconnect. A notice
+    // timeout must not release the transport barrier and enqueue more reads.
+    const timeout = new Promise<void>(resolve => {
+      timer = setTimeout(() => {
+        if (active && started === epoch) reportConnection("Error: Backend read timed out");
+        resolve();
+      }, readTimeoutMs);
     });
-    reading = (async () => {
+    const pending = (async () => {
       try {
-        // A Promise callback receives its resolved value. Decky's callable
-        // forwards every argument to Python, including an implicit undefined.
-        const state = await Promise.race([Promise.resolve().then(() => read()), timeout]);
+        const state = await Promise.resolve().then(() => read());
         if (!active || writing || started !== epoch) return;
         observed = state;
         reportConnection("");
@@ -68,6 +71,7 @@ export function createStateSync<T extends object>(
         if (active && started !== epoch && !writing) void refresh();
       }
     })();
+    reading = Promise.race([pending, timeout]);
     return reading;
   };
 

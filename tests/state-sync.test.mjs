@@ -117,13 +117,30 @@ test("slow polls share one request and still publish its response", async () => 
   assert.equal(f.latest().sdr, 1.5);
 });
 
-test("a read timeout is visible and a later read recovers", async () => {
+test("timed-out reads remain bounded and recover when Decky replays the pending call", async () => {
+  const pending = deferred(), errors = [], renders = [];
+  let calls = 0;
+  const sync = createStateSync(() => { ++calls; return pending.promise; },
+    state => renders.push(state), () => {}, message => errors.push(message), 5);
+  try {
+    sync.activate(); await sync.refresh();
+    assert.match(errors.at(-1), /timed out/);
+    for (let n = 0; n < 4; ++n) await sync.refresh();
+    assert.equal(calls, 1, "Decky retains pending calls and replays each on reconnect");
+    pending.resolve({ value: 2 });
+    for (let n = 0; n < 8; ++n) await Promise.resolve();
+    assert.deepEqual(renders.at(-1), { value: 2 });
+    assert.equal(errors.at(-1), "");
+  } finally { sync.dispose(); }
+});
+
+test("a settled failed read releases the barrier and a later read recovers", async () => {
   const errors = [], renders = [];
-  let reader = () => new Promise(() => {});
+  let reader = async () => { throw new Error("connection lost"); };
   const sync = createStateSync(() => reader(), s => renders.push(s), () => {},
     message => errors.push(message), 5);
   sync.activate(); await sync.refresh();
-  assert.match(errors.at(-1), /timed out/);
+  assert.match(errors.at(-1), /connection lost/);
   reader = async () => ({ value: 1 });
   await sync.refresh();
   assert.equal(errors.at(-1), "");
@@ -302,4 +319,26 @@ test("commands without a coalescing identity keep all side effects", async () =>
   wait.resolve(); await Promise.all([first, ...commands]);
   assert.deepEqual(calls, [0, 1, 2, 3, 4]);
   f.sync.deactivate();
+});
+
+test("reopen and reset during a timed-out read keep one call and ignore its stale reply", async () => {
+  const pending = deferred(), screens = [];
+  let backend = { value: 1 }, calls = 0;
+  const sync = createStateSync(() => ++calls === 1 ? pending.promise : Promise.resolve({ ...backend }),
+    () => {}, () => {}, () => {}, 5);
+  try {
+    const close = sync.subscribe(s => screens.push(s), () => {});
+    await sync.refresh();
+    close();
+    sync.subscribe(s => screens.push(s), () => {});
+    await sync.refresh();
+    await sync.command({ value: 0 }, async () => backend = { value: 0 });
+    await sync.refresh();
+    assert.equal(calls, 1);
+    pending.resolve({ value: 9 });
+    for (let i = 0; i < 16; ++i) await Promise.resolve();
+    assert.equal(calls, 2);
+    assert.deepEqual(screens.at(-1), { value: 0 });
+    assert.ok(screens.every(s => s.value !== 9));
+  } finally { sync.dispose(); }
 });

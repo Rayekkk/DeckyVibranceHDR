@@ -71,61 +71,66 @@ const notify = (title: string, body: string) =>
 const pct = (v: number) => `${Math.round(v * 100)}%`;
 
 // ── Updates ────────────────────────────────────────────────────────────────────
+// Operations and results outlive the QAM component. A reopened panel subscribes
+// to the same request rather than starting another or losing a completed file.
+let updates = { info: null as UpdateInfo | null, version: "", checking: false,
+  downloading: false, downloadPath: null as string | null };
+const updateListeners = new Set<(state: typeof updates) => void>();
+let updatesDisposed = false;
+let versionReading: Promise<void> | null = null;
+const updateSnapshot = (patch: Partial<typeof updates>) => {
+  if (updatesDisposed) return;
+  updates = { ...updates, ...patch };
+  for (const listener of updateListeners) listener(updates);
+};
+const updateError = (title: string, message: string) => {
+  updateSnapshot({ info: { ...updates.info, error: message } });
+  if (!updatesDisposed && updateListeners.size) notify(title, message);
+};
+const readVersion = () => {
+  if (updatesDisposed || versionReading || updates.version) return;
+  versionReading = (async () => {
+    try { const result = await getVersion(); updateSnapshot({ version: result.version ?? "" }); }
+    catch { /* A later mount can retry the version read. */ }
+    finally { versionReading = null; }
+  })();
+};
+const checkUpdate = async () => {
+  if (updatesDisposed || updates.checking || updates.downloading) return;
+  updateSnapshot({ checking: true, info: null, downloadPath: null });
+  try { updateSnapshot({ info: await checkForUpdates() }); }
+  catch (e) { updateError("Update check failed", e instanceof Error ? e.message : String(e)); }
+  finally { updateSnapshot({ checking: false }); }
+};
+const downloadUpdate = async () => {
+  const info = updates.info;
+  if (updatesDisposed || updates.checking || updates.downloading
+      || !info?.download_url || !info?.asset_name) return;
+  updateSnapshot({ downloading: true });
+  try {
+    const result = await performUpdate(info.download_url, info.asset_name);
+    if (result.success && result.path) updateSnapshot({ downloadPath: result.path });
+    else updateError("Download failed", result.error ?? "Unknown error");
+  } catch (e) { updateError("Download failed", e instanceof Error ? e.message : String(e)); }
+  finally { updateSnapshot({ downloading: false }); }
+};
 const UpdateSection: FC = () => {
-  const [info, setInfo] = useState<UpdateInfo | null>(null);
-  const [version, setVersion] = useState("");
-  const [checking, setChecking] = useState(false);
-  const [downloading, setDownloading] = useState(false);
-  const [downloadPath, setDownloadPath] = useState<string | null>(null);
+  const [state, setState] = useState(updates);
+  const { info, version, checking, downloading, downloadPath } = state;
   const mounted = useRef(false);
-  const busy = useRef(false);
-
   useEffect(() => {
-    let active = true;
     mounted.current = true;
-    getVersion()
-      .then((v) => { if (active) setVersion(v.version ?? ""); })
-      .catch(() => undefined);
-    return () => { active = false; mounted.current = false; };
+    updateListeners.add(setState);
+    setState(updates);
+    readVersion();
+    return () => { mounted.current = false; updateListeners.delete(setState); };
   }, []);
-
   const check = useCallback(async () => {
-    if (busy.current) return;
-    busy.current = true;
-    setChecking(true);
-    setInfo(null);
-    setDownloadPath(null);
-    try {
-      const result = await checkForUpdates();
-      if (mounted.current) setInfo(result);
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e);
-      if (mounted.current) { notify("Update check failed", msg); setInfo({ error: msg }); }
-    } finally {
-      busy.current = false;
-      if (mounted.current) setChecking(false);
-    }
+    if (mounted.current) await checkUpdate();
   }, []);
-
   const download = useCallback(async () => {
-    if (busy.current || !info?.download_url || !info?.asset_name) return;
-    busy.current = true;
-    setDownloading(true);
-    try {
-      const res = await performUpdate(info.download_url, info.asset_name);
-      if (!mounted.current) return;
-      if (res.success && res.path) setDownloadPath(res.path);
-      else {
-        setInfo({ ...info, error: res.error });
-        notify("Download failed", res.error ?? "Unknown error");
-      }
-    } catch (e) {
-      if (mounted.current) notify("Download failed", e instanceof Error ? e.message : String(e));
-    } finally {
-      busy.current = false;
-      if (mounted.current) setDownloading(false);
-    }
-  }, [info]);
+    if (mounted.current) await downloadUpdate();
+  }, []);
 
   return (
     <PanelSection title="Updates">
@@ -236,15 +241,13 @@ const Content: FC = () => {
       <><PanelSection title="Not available">
         <PanelSectionRow>
           <Field
-            label="gamescope not reachable"
-            description={
-              `${connectionError || state.reason}. This plugin talks to gamescope directly, so it ` +
-              "only works in Game Mode."
-            }
+            label={connectionError ? "Backend unavailable" : "Plugin not ready"}
+            description={connectionError || state.reason}
           />
         </PanelSectionRow>
         {state.settings_error && <PanelSectionRow>
-          <Field label="Settings not saved" description={state.settings_error} />
+          <Field label={state.reason.startsWith("could not load settings:")
+            ? "Could not load settings" : "Settings not saved"} description={state.settings_error} />
         </PanelSectionRow>}
         {connectionError && <PanelSectionRow><ButtonItem onClick={() => void sync.refresh()}>
           Retry
@@ -441,6 +444,8 @@ export default definePlugin(() => ({
   icon: <VibranceIcon />,
   onDismount() {
     pluginStateSync.dispose();
+    updatesDisposed = true;
+    updateListeners.clear();
     /* the backend restores both settings in _unload */
   },
 }));
