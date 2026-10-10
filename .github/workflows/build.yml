@@ -29,9 +29,8 @@ jobs:
       - name: Check the backend parses
         run: python -m compileall -q main.py lego_updater.py vibrance_lut.py
 
-      # test_device.py skips itself here; there is no Legion Go on a runner.
       - name: Backend tests
-        run: python -m unittest discover -s tests -v
+        run: python -W error -m unittest discover -s tests -v
 
       - name: Check versions agree
         run: |
@@ -43,17 +42,20 @@ jobs:
       - name: Install
         run: npm ci
 
+      - name: Audit build dependencies
+        run: npm audit --audit-level=low
+
       - name: Typecheck
         run: npm run typecheck
 
       - name: Frontend state regression tests
         run: npm test
 
-      - name: Build
-        run: npm run build
-
       - name: Package
         run: npm run package
+
+      - name: Verify built frontend and ZIP payload
+        run: npm run verify:package
 
       - uses: actions/upload-artifact@v4
         with:

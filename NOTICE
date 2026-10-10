@@ -7,15 +7,19 @@ This product is licensed under the BSD 3-Clause License. See LICENSE for the ful
 Third-party components
 ================================================================================
 
-None are bundled. The release archive contains only this plugin's own source
-and its compiled frontend.
+The compiled frontend includes @decky/api from the SteamDeckHomebrew project,
+licensed under LGPL-2.1. Its exact version, upstream metadata, licence and
+unmodified TypeScript/JavaScript source are in third_party/decky-api/.
+https://github.com/SteamDeckHomebrew/loader-api
+
+React and @decky/ui are supplied by the Decky host and are not bundled here.
 
 The plugin shells out to `xprop` (xorg-xprop) to read and write the gamescope
 atoms. It is already part of SteamOS and is not redistributed here.
 
-`lego_updater.py` is shared verbatim with the author's other DeckyLoader
-plugins, so a fix to the trust store or the host allowlist lands in all of
-them. It is not third-party code.
+`lego_updater.py` originated in the author's other DeckyLoader plugins.
+This checkout contains further audit fixes; other repositories are maintained
+separately. It is not third-party code.
 
 ================================================================================
 Prior art

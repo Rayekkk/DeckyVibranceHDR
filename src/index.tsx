@@ -13,7 +13,7 @@ import {
   staticClasses,
   ToggleField,
 } from "@decky/ui";
-import { FC, useCallback, useEffect, useMemo, useState } from "react";
+import { FC, useCallback, useEffect, useRef, useState } from "react";
 import { createStateSync } from "./stateSync";
 
 interface State {
@@ -29,6 +29,7 @@ interface State {
   sdr_error: string;
   sdr_look_error: string;
   hdr_error: string;
+  settings_error: string;
   generating: boolean;
   conflict: string;
   external_display: boolean;
@@ -52,8 +53,8 @@ interface UpdateInfo {
 }
 
 const getState = callable<[], State>("get_state");
-const setSdrEnabled = callable<[boolean], State>("set_sdr_enabled");
-const setHdrEnabled = callable<[boolean], State>("set_hdr_enabled");
+const setSdrEnabled = callable<[boolean, number], State>("set_sdr_enabled");
+const setHdrEnabled = callable<[boolean, number], State>("set_hdr_enabled");
 const setSdrSaturation = callable<[number], State>("set_sdr_saturation");
 const setHdrSaturation = callable<[number], State>("set_hdr_saturation");
 const resetAll = callable<[], State>("reset");
@@ -76,44 +77,53 @@ const UpdateSection: FC = () => {
   const [checking, setChecking] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [downloadPath, setDownloadPath] = useState<string | null>(null);
+  const mounted = useRef(false);
+  const busy = useRef(false);
 
   useEffect(() => {
     let active = true;
+    mounted.current = true;
     getVersion()
       .then((v) => { if (active) setVersion(v.version ?? ""); })
       .catch(() => undefined);
-    return () => { active = false; };
+    return () => { active = false; mounted.current = false; };
   }, []);
 
   const check = useCallback(async () => {
+    if (busy.current) return;
+    busy.current = true;
     setChecking(true);
     setInfo(null);
     setDownloadPath(null);
     try {
-      setInfo(await checkForUpdates());
+      const result = await checkForUpdates();
+      if (mounted.current) setInfo(result);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      notify("Update check failed", msg);
-      setInfo({ error: msg });
+      if (mounted.current) { notify("Update check failed", msg); setInfo({ error: msg }); }
     } finally {
-      setChecking(false);
+      busy.current = false;
+      if (mounted.current) setChecking(false);
     }
   }, []);
 
   const download = useCallback(async () => {
-    if (!info?.download_url || !info?.asset_name) return;
+    if (busy.current || !info?.download_url || !info?.asset_name) return;
+    busy.current = true;
     setDownloading(true);
     try {
       const res = await performUpdate(info.download_url, info.asset_name);
+      if (!mounted.current) return;
       if (res.success && res.path) setDownloadPath(res.path);
       else {
         setInfo({ ...info, error: res.error });
         notify("Download failed", res.error ?? "Unknown error");
       }
     } catch (e) {
-      notify("Download failed", e instanceof Error ? e.message : String(e));
+      if (mounted.current) notify("Download failed", e instanceof Error ? e.message : String(e));
     } finally {
-      setDownloading(false);
+      busy.current = false;
+      if (mounted.current) setDownloading(false);
     }
   }, [info]);
 
@@ -121,7 +131,7 @@ const UpdateSection: FC = () => {
     <PanelSection title="Updates">
       <PanelSectionRow>
         <Field label="Installed" focusable>
-          {`v${info?.current_version ?? version ?? "?"}`}
+          {`v${info?.current_version || version || "?"}`}
         </Field>
       </PanelSectionRow>
 
@@ -174,18 +184,30 @@ const UpdateSection: FC = () => {
 };
 
 // ── Main content ───────────────────────────────────────────────────────────────
+// QAM content can unmount while an RPC is in flight. Keep one queue across
+// openings so a previous panel cannot send an old edit after the new one.
+const pluginStateSync = createStateSync<State>(getState, () => undefined,
+  error => notify("Setting failed", String(error)));
 const Content: FC = () => {
   const visible = useQuickAccessVisible();
   const [state, setState] = useState<State | null>(null);
+  const [connectionError, setConnectionError] = useState("");
 
-  const sync = useMemo(() => createStateSync<State>(getState, setState,
-    (error) => notify("Setting failed", String(error))), []);
+  const sync = pluginStateSync;
 
   useEffect(() => {
-    sync.activate();
-    void sync.refresh();
-    const id = visible ? setInterval(() => void sync.refresh(), 1000) : undefined;
-    return () => { clearInterval(id); sync.deactivate(); };
+    return sync.subscribe(setState, setConnectionError);
+  }, [sync]);
+
+  useEffect(() => {
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = async () => {
+      await sync.refresh();
+      if (!stopped && visible) timer = setTimeout(poll, 1000);
+    };
+    void poll();
+    return () => { stopped = true; clearTimeout(timer); };
   }, [visible, sync]);
 
   // Slider moves are applied optimistically so the control stays responsive;
@@ -200,30 +222,43 @@ const Content: FC = () => {
     return (
       <PanelSection>
         <PanelSectionRow>
-          <Spinner />
+          {connectionError ? <Field label="Backend unavailable" description={connectionError} /> : <Spinner />}
         </PanelSectionRow>
+        {connectionError && <PanelSectionRow><ButtonItem onClick={() => void sync.refresh()}>
+          Retry
+        </ButtonItem></PanelSectionRow>}
       </PanelSection>
     );
   }
 
   if (!state.ready) {
     return (
-      <PanelSection title="Not available">
+      <><PanelSection title="Not available">
         <PanelSectionRow>
           <Field
             label="gamescope not reachable"
             description={
-              `${state.reason}. This plugin talks to gamescope directly, so it ` +
+              `${connectionError || state.reason}. This plugin talks to gamescope directly, so it ` +
               "only works in Game Mode."
             }
           />
         </PanelSectionRow>
-      </PanelSection>
+        {state.settings_error && <PanelSectionRow>
+          <Field label="Settings not saved" description={state.settings_error} />
+        </PanelSectionRow>}
+        {connectionError && <PanelSectionRow><ButtonItem onClick={() => void sync.refresh()}>
+          Retry
+        </ButtonItem></PanelSectionRow>}
+      </PanelSection><UpdateSection /></>
     );
   }
 
   return (
     <>
+      {(connectionError || state.settings_error) && <PanelSection title="Connection and settings">
+        <PanelSectionRow><Field label={connectionError ? "Backend unavailable" : "Settings not saved"}
+          description={connectionError || state.settings_error} /></PanelSectionRow>
+      </PanelSection>}
       {state.conflict && (
         <PanelSection title="Heads up">
           <PanelSectionRow>
@@ -269,7 +304,11 @@ const Content: FC = () => {
             label="Enabled"
             description="Applies to the Steam UI and any game not running in HDR."
             checked={state.sdr_enabled}
-            onChange={(v) => push(setSdrEnabled, "sdr_enabled", v)}
+            onChange={(v) => {
+              const saturation = sync.snapshot()?.sdr_saturation ?? state.sdr_saturation;
+              return sync.command({ sdr_enabled: v, sdr_saturation: saturation },
+                () => setSdrEnabled(v, saturation), ["sdr_saturation"], { key: "sdr-toggle" });
+            }}
           />
         </PanelSectionRow>
 
@@ -319,7 +358,11 @@ const Content: FC = () => {
             label="Enabled"
             description="Applies only to games actually running in HDR. gamescope has no dial for this, so the plugin builds a colour LUT for it."
             checked={state.hdr_enabled}
-            onChange={(v) => push(setHdrEnabled, "hdr_enabled", v)}
+            onChange={(v) => {
+              const saturation = sync.snapshot()?.hdr_saturation ?? state.hdr_saturation;
+              return sync.command({ hdr_enabled: v, hdr_saturation: saturation },
+                () => setHdrEnabled(v, saturation), ["hdr_saturation"], { key: "hdr-toggle" });
+            }}
           />
         </PanelSectionRow>
 
@@ -332,7 +375,7 @@ const Content: FC = () => {
                   state.hdr_saturation > state.hdr_soft_limit
                     ? `Above ${pct(state.hdr_soft_limit)} channels start clipping ` +
                       "at the edge of the gamut."
-                    : "Computed in ICtCp, so lightness and hue stay put."
+                    : "ICtCp preserves intensity and chroma direction before clipping."
                 }
                 value={state.hdr_saturation}
                 min={state.hdr_min}
@@ -368,7 +411,10 @@ const Content: FC = () => {
         <PanelSectionRow>
           <ButtonItem
             layout="below"
-            onClick={() => push(async () => await resetAll(), "ready", true)}
+            onClick={() => sync.command({ sdr_enabled: false, hdr_enabled: false,
+              sdr_saturation: 1, hdr_saturation: 1 }, resetAll,
+              ["sdr_saturation", "hdr_saturation"],
+              { key: "reset", supersedes: ["sdr-toggle", "hdr-toggle"] })}
           >
             Back to defaults
           </ButtonItem>
@@ -394,6 +440,7 @@ export default definePlugin(() => ({
   content: <Content />,
   icon: <VibranceIcon />,
   onDismount() {
+    pluginStateSync.dispose();
     /* the backend restores both settings in _unload */
   },
 }));

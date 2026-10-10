@@ -19,6 +19,29 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+test("Decky zero-argument reads stay empty across initial polls and write refreshes", async () => {
+  const calls = [], renders = [], connections = [];
+  const sync = createStateSync(async (...args) => {
+    // Decky's rest arguments are JSON-encoded before Python dispatch.
+    const wireArgs = JSON.parse(JSON.stringify(args));
+    calls.push(wireArgs);
+    if (wireArgs.length) throw new Error("Plugin.get_state() takes 1 positional argument but 2 were given");
+    return { value: 1 };
+  }, state => renders.push(state), () => {}, message => connections.push(message));
+  try {
+    sync.activate();
+    await sync.refresh();
+    assert.deepEqual(calls, [[]]);
+    assert.deepEqual(renders.at(-1), { value: 1 });
+    assert.equal(connections.at(-1), "");
+    await sync.mutate("value", 2, async () => ({ value: 2 }));
+    await sync.refresh();
+    assert.ok(calls.length >= 2);
+    assert.ok(calls.every(args => args.length === 0));
+    assert.equal(connections.at(-1), "");
+  } finally { sync.dispose(); }
+});
+
 async function fixture() {
   let backend = { sdr: 1, hdr: 1, enabled: true };
   let reader = async () => ({ ...backend });
@@ -84,13 +107,74 @@ test("failed RPC does not block later edits or leave the optimistic value stuck"
   assert.deepEqual(f.latest(), { sdr: 1, hdr: 1, enabled: false });
 });
 
-test("only the newest overlapping poll is accepted", async () => {
-  const f = await fixture(), old = deferred(), fresh = deferred();
-  f.reader(() => old.promise); const a = f.sync.refresh();
-  f.reader(() => fresh.promise); const b = f.sync.refresh();
-  fresh.resolve({ sdr: 1.5, hdr: 1, enabled: true }); await b;
-  old.resolve({ sdr: 1, hdr: 1, enabled: true }); await a;
+test("slow polls share one request and still publish its response", async () => {
+  const f = await fixture(), old = deferred();
+  let calls = 0;
+  f.reader(() => { ++calls; return old.promise; }); const a = f.sync.refresh();
+  const b = f.sync.refresh();
+  old.resolve({ sdr: 1.5, hdr: 1, enabled: true }); await Promise.all([a, b]);
+  assert.equal(calls, 1);
   assert.equal(f.latest().sdr, 1.5);
+});
+
+test("a read timeout is visible and a later read recovers", async () => {
+  const errors = [], renders = [];
+  let reader = () => new Promise(() => {});
+  const sync = createStateSync(() => reader(), s => renders.push(s), () => {},
+    message => errors.push(message), 5);
+  sync.activate(); await sync.refresh();
+  assert.match(errors.at(-1), /timed out/);
+  reader = async () => ({ value: 1 });
+  await sync.refresh();
+  assert.equal(errors.at(-1), "");
+  assert.deepEqual(renders.at(-1), { value: 1 });
+  sync.deactivate();
+});
+
+test("200 slider moves send only the in-flight value and latest unsent value", async () => {
+  const f = await fixture(), wait = deferred();
+  const calls = [], pending = [];
+  for (let n = 0; n < 200; ++n) pending.push(f.sync.mutate("sdr", n,
+    async () => { calls.push(n); if (n === 0) await wait.promise; return f.write({ sdr: n }); }));
+  assert.equal(f.latest().sdr, 199);
+  wait.resolve(); await Promise.all(pending);
+  assert.deepEqual(calls, [0, 199]);
+});
+
+test("disable cancels unsent moves and carries the newest slider value", async () => {
+  const f = await fixture(), wait = deferred(), calls = [];
+  const first = f.sync.mutate("sdr", 1.1, async () => {
+    calls.push("first"); await wait.promise; return f.write({ sdr: 1.1 });
+  });
+  const slider = f.sync.mutate("sdr", 1.5, async () => { calls.push("stale"); return f.write({ sdr: 1.5 }); });
+  const value = f.sync.snapshot().sdr;
+  const off = f.sync.command({ enabled: false, sdr: value }, async () => {
+    calls.push("off"); return f.write({ enabled: false, sdr: value });
+  }, ["sdr"]);
+  assert.equal(f.latest().enabled, false);
+  wait.resolve(); await Promise.all([first, slider, off]);
+  assert.deepEqual(calls, ["first", "off"]);
+  assert.deepEqual(f.latest(), { sdr: 1.5, hdr: 1, enabled: false });
+});
+
+test("reset optimistically updates all controls and cancels both sliders", async () => {
+  const f = await fixture(), wait = deferred();
+  const a = f.sync.mutate("sdr", 1.4, async () => { await wait.promise; return f.write({ sdr: 1.4 }); });
+  const b = f.sync.mutate("hdr", 1.3, async () => { throw new Error("must be cancelled"); });
+  const c = f.sync.command({ sdr: 1, hdr: 1, enabled: false }, async () =>
+    f.write({ sdr: 1, hdr: 1, enabled: false }), ["sdr", "hdr"]);
+  assert.deepEqual(f.latest(), { sdr: 1, hdr: 1, enabled: false });
+  wait.resolve(); await Promise.all([a, b, c]);
+  assert.equal(f.errors.length, 0);
+});
+
+/* A late response is already covered by the mutation epoch test above. */
+test("a read failure reports the connection error", async () => {
+  const errors = [];
+  const sync = createStateSync(async () => { throw new Error("offline"); }, () => {},
+    () => {}, message => errors.push(message));
+  sync.activate(); await sync.refresh(); sync.deactivate();
+  assert.match(errors[0], /offline/);
 });
 
 test("unmounted content ignores late snapshots", async () => {
@@ -101,4 +185,121 @@ test("unmounted content ignores late snapshots", async () => {
   f.sync.deactivate();
   old.resolve({ sdr: 1.5, hdr: 1, enabled: true }); await refresh;
   assert.equal(f.renders.length, count);
+});
+
+test("slow writes report their status and cannot be overtaken", async () => {
+  const wait = deferred(), errors = [], calls = [];
+  const sync = createStateSync(async () => ({ value: 0 }), () => {}, () => {},
+    message => errors.push(message), 100, 5);
+  sync.activate(); await sync.refresh();
+  const a = sync.mutate("value", 1, async () => { calls.push(1); await wait.promise; return { value: 1 }; });
+  const b = sync.command({ value: 0 }, async () => { calls.push(0); return { value: 0 }; });
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.match(errors.at(-1), /pending/);
+  assert.deepEqual(calls, [1]);
+  wait.resolve(); await Promise.all([a, b]);
+  assert.deepEqual(calls, [1, 0]);
+  assert.equal(errors.at(-1), "");
+  sync.deactivate();
+});
+
+test("reopening QAM shares the queue and cannot resurrect old slider requests", async () => {
+  let backend = { value: 1, enabled: true };
+  const wait = deferred(), calls = [], oldRenders = [], freshRenders = [];
+  const sync = createStateSync(async () => ({ ...backend }), () => {}, () => {});
+  const close = sync.subscribe(s => oldRenders.push(s), () => {});
+  await sync.refresh();
+  const first = sync.mutate("value", 1.1, async () => {
+    calls.push("first"); await wait.promise; return backend = { ...backend, value: 1.1 };
+  });
+  const oldSlider = sync.mutate("value", 1.4, async () => {
+    calls.push("old slider"); return backend = { ...backend, value: 1.4 };
+  });
+  close();
+  const oldCount = oldRenders.length;
+  const closeNew = sync.subscribe(s => freshRenders.push(s), () => {});
+  assert.equal(freshRenders.at(-1).value, 1.4);
+  const latest = sync.command({ value: 1.4, enabled: false }, async () => {
+    calls.push("off"); return backend = { value: 1.4, enabled: false };
+  }, ["value"]);
+  wait.resolve(); await Promise.all([first, oldSlider, latest]);
+  assert.deepEqual(calls, ["first", "off"]);
+  assert.equal(oldRenders.length, oldCount);
+  assert.deepEqual(freshRenders.at(-1), { value: 1.4, enabled: false });
+  closeNew();
+});
+
+test("plugin disposal stops queued and future RPCs", async () => {
+  const f = await fixture(), wait = deferred(), calls = [];
+  const a = f.sync.mutate("sdr", 1.1, async () => { calls.push(1); await wait.promise; return f.write({ sdr: 1.1 }); });
+  const b = f.sync.mutate("sdr", 1.4, async () => { calls.push(2); return f.write({ sdr: 1.4 }); });
+  f.sync.dispose();
+  const count = f.renders.length;
+  await f.sync.mutate("sdr", 1.5, async () => { calls.push(3); return f.write({ sdr: 1.5 }); });
+  wait.resolve(); await Promise.all([a, b]);
+  assert.deepEqual(calls, [1]);
+  assert.equal(f.renders.length, count);
+});
+
+test("rapid toggles keep only the latest unsent control intent", async () => {
+  const f = await fixture(), wait = deferred(), calls = [], pending = [];
+  for (let n = 0; n < 200; ++n) {
+    const enabled = n % 2 === 0;
+    pending.push(f.sync.command({ enabled, sdr: 1.4 }, async () => {
+      calls.push(n); if (n === 0) await wait.promise;
+      return f.write({ enabled, sdr: 1.4 });
+    }, ["sdr"], { key: "sdr-toggle" }));
+  }
+  assert.equal(f.latest().enabled, false);
+  wait.resolve(); await Promise.all(pending);
+  assert.deepEqual(calls, [0, 199]);
+  f.sync.deactivate();
+});
+
+test("reset supersedes queued toggles as well as slider moves", async () => {
+  const f = await fixture(), wait = deferred(), calls = [];
+  const first = f.sync.mutate("sdr", 1.2, async () => {
+    await wait.promise; calls.push("slider"); return f.write({ sdr: 1.2 });
+  });
+  const toggle = f.sync.command({ enabled: true, sdr: 1.4 }, async () => {
+    calls.push("toggle"); return f.write({ enabled: true, sdr: 1.4 });
+  }, ["sdr"], { key: "sdr-toggle" });
+  const reset = f.sync.command({ enabled: false, sdr: 1, hdr: 1 }, async () => {
+    calls.push("reset"); return f.write({ enabled: false, sdr: 1, hdr: 1 });
+  }, ["sdr", "hdr"], { key: "reset", supersedes: ["sdr-toggle", "hdr-toggle"] });
+  wait.resolve(); await Promise.all([first, toggle, reset]);
+  assert.deepEqual(calls, ["slider", "reset"]);
+  assert.deepEqual(f.latest(), { sdr: 1, hdr: 1, enabled: false });
+  f.sync.deactivate();
+});
+
+test("a toggle after reset preserves reset and the other half's intent", async () => {
+  const f = await fixture(), wait = deferred(), calls = [];
+  const first = f.sync.mutate("sdr", 1.2, async () => {
+    await wait.promise; return f.write({ sdr: 1.2 });
+  });
+  const reset = f.sync.command({ enabled: false, sdr: 1, hdr: 1 }, async () => {
+    calls.push("reset"); return f.write({ enabled: false, sdr: 1, hdr: 1 });
+  }, ["sdr", "hdr"], { key: "reset", supersedes: ["sdr-toggle", "hdr-toggle"] });
+  const hdr = f.sync.command({ hdr: 1.3 }, async () => {
+    calls.push("hdr"); return f.write({ hdr: 1.3 });
+  }, ["hdr"], { key: "hdr-toggle" });
+  const on = f.sync.command({ enabled: true, sdr: 1 }, async () => {
+    calls.push("on"); return f.write({ enabled: true, sdr: 1 });
+  }, ["sdr"], { key: "sdr-toggle" });
+  wait.resolve(); await Promise.all([first, reset, hdr, on]);
+  assert.deepEqual(calls, ["reset", "hdr", "on"]);
+  assert.deepEqual(f.latest(), { enabled: true, sdr: 1, hdr: 1.3 });
+  f.sync.deactivate();
+});
+
+test("commands without a coalescing identity keep all side effects", async () => {
+  const f = await fixture(), wait = deferred(), calls = [];
+  const first = f.sync.mutate("sdr", 1.2, async () => { await wait.promise; return f.write({ sdr: 1.2 }); });
+  const commands = Array.from({ length: 5 }, (_, n) => f.sync.command({}, async () => {
+    calls.push(n); return f.write({});
+  }));
+  wait.resolve(); await Promise.all([first, ...commands]);
+  assert.deepEqual(calls, [0, 1, 2, 3, 4]);
+  f.sync.deactivate();
 });

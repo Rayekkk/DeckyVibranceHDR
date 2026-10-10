@@ -1,7 +1,21 @@
-import deckyPlugin from "@decky/rollup";
+import { readFileSync, rmSync } from "node:fs";
+import typescript from "@rollup/plugin-typescript";
+import { nodeResolve } from "@rollup/plugin-node-resolve";
+import externalGlobals from "rollup-plugin-external-globals";
 
-// The official Decky preset externalises react, react/jsx-runtime, react-dom and
-// @decky/ui onto the globals Steam injects (SP_REACT, SP_JSX, SP_REACTDOM, DFL)
-// and inlines plugin.json as @decky/manifest. Bundling @decky/ui instead trips a
-// SyntaxError in Steam's CEF engine.
-export default deckyPlugin();
+const manifest = JSON.parse(readFileSync(new URL("./plugin.json", import.meta.url), "utf8"));
+// Keep the Decky host globals and manifest contract without its unused asset
+// and deletion plugins (which pulled in vulnerable glob dependencies).
+export default {
+  input: "src/index.tsx", context: "window",
+  external: ["react", "react-dom", "@decky/ui"],
+  plugins: [{ name: "clean-plugin-output", buildStart() {
+      rmSync(new URL("./dist", import.meta.url), { recursive: true, force: true });
+    } }, typescript(), nodeResolve({ browser: true }),
+    externalGlobals({ react: "SP_REACT", "react/jsx-runtime": "SP_JSX",
+      "react-dom": "SP_REACTDOM", "@decky/ui": "DFL",
+      "@decky/manifest": JSON.stringify(manifest) })],
+  output: { dir: "dist", format: "esm", exports: "default", sourcemap: true,
+    sourcemapPathTransform: path => path.replace(/^\.\.\//,
+      `decky://decky/plugin/${encodeURIComponent(manifest.name)}/`) },
+};

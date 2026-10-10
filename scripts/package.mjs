@@ -12,8 +12,8 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, cpSync, readFileSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync, mkdirSync, rmSync, cpSync, readFileSync, renameSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -26,6 +26,7 @@ const version = manifest.version;
 const buildDir = join(repoRoot, "build");
 const stageDir = join(buildDir, PLUGIN_DIR_NAME);
 const zipPath = join(repoRoot, `${PLUGIN_DIR_NAME}-${version}.zip`);
+const pendingZip = join(buildDir, "release.zip");
 
 /** Runtime payload only - no sources, lockfiles, git, node_modules, or tests. */
 const CONTENTS = [
@@ -58,7 +59,6 @@ if (pkgVersion !== version) {
 }
 
 rmSync(buildDir, { recursive: true, force: true });
-rmSync(zipPath, { force: true });
 mkdirSync(stageDir, { recursive: true });
 
 for (const entry of CONTENTS) {
@@ -67,8 +67,19 @@ for (const entry of CONTENTS) {
   cpSync(from, join(stageDir, entry), {
     recursive: true,
     // Keep build artefacts and caches out of the archive.
-    filter: (src) => !/(__pycache__|\.pyc$|\.DS_Store|node_modules)/.test(src),
+    filter: (src) => !["__pycache__", ".DS_Store", "node_modules"].includes(basename(src))
+      && !basename(src).endsWith(".pyc"),
   });
+}
+
+// @decky/api is compiled into dist/index.js. Ship its licence and exact source
+// so recipients can inspect, modify and rebuild the library portion.
+const apiDir = join(repoRoot, "node_modules", "@decky", "api");
+const apiStage = join(stageDir, "third_party", "decky-api");
+mkdirSync(apiStage, { recursive: true });
+for (const entry of ["LICENSE", "package.json", "dist", "src", "README.md"]) {
+  if (existsSync(join(apiDir, entry))) cpSync(join(apiDir, entry), join(apiStage, entry), { recursive: true });
+  else if (["LICENSE", "package.json", "dist", "src"].includes(entry)) fail(`@decky/api ${entry} is missing`);
 }
 
 function sevenZip() {
@@ -82,10 +93,10 @@ function sevenZip() {
 const sevenZipPath = sevenZip();
 try {
   if (sevenZipPath) {
-    execFileSync(sevenZipPath, ["a", "-tzip", "-mx=9", zipPath, PLUGIN_DIR_NAME],
+    execFileSync(sevenZipPath, ["a", "-tzip", "-mx=9", pendingZip, PLUGIN_DIR_NAME],
       { cwd: buildDir, stdio: "inherit" });
   } else {
-    execFileSync("zip", ["-r", "-9", "-q", zipPath, PLUGIN_DIR_NAME],
+    execFileSync("zip", ["-r", "-9", "-q", pendingZip, PLUGIN_DIR_NAME],
       { cwd: buildDir, stdio: "inherit" });
   }
 } catch (err) {
@@ -96,5 +107,6 @@ try {
   );
 }
 
+renameSync(pendingZip, zipPath);
 rmSync(buildDir, { recursive: true, force: true });
 console.log(`packaged v${version} -> ${zipPath}`);
