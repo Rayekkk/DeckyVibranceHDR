@@ -4,350 +4,272 @@
 
 [![Release](https://img.shields.io/github/v/release/Rayekkk/DeckyVibranceHDR?style=for-the-badge&label=release&color=C2410C&labelColor=141417)](https://github.com/Rayekkk/DeckyVibranceHDR/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/Rayekkk/DeckyVibranceHDR/total?style=for-the-badge&label=downloads&color=15803D&labelColor=141417)](https://github.com/Rayekkk/DeckyVibranceHDR/releases)
-[![Device](https://img.shields.io/badge/device-any_gamescope_panel-6E40C9?style=for-the-badge&labelColor=141417)](#requirements)
+[![Environment](https://img.shields.io/badge/environment-gamescope_Game_Mode-6E40C9?style=for-the-badge&labelColor=141417)](#requirements)
 [![Requires](https://img.shields.io/badge/requires-Decky_Loader-0969DA?style=for-the-badge&labelColor=141417)](https://decky.xyz)
 [![License](https://img.shields.io/github/license/Rayekkk/DeckyVibranceHDR?style=for-the-badge&label=license&color=424A53&labelColor=141417)](LICENSE)
 
-**Saturation control for both SDR and HDR content under gamescope, in one plugin.**
-Two sliders: one for the Steam interface and ordinary games, one for content actually running in HDR.
+**Adjust SDR and HDR saturation from the Steam overlay.**
+Use separate controls for the Steam interface and ordinary games, and for games already running in HDR.
 
-[Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Usage](#usage) · [How it works](#how-it-works) · [Troubleshooting](#troubleshooting)
+[Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Quick start](#usage) · [Technical details](#how-it-works) · [Troubleshooting](#troubleshooting)
 
 </div>
-
-<!-- Screenshots go here once they exist. Two columns keeps a 16:10 capture
-     from swallowing the page - it renders at half width, so half the height.
-
-| | |
-|---|---|
-| ![SDR](docs/panel1.jpeg) | ![HDR](docs/panel2.jpeg) |
--->
 
 ---
 
 ## Features
 
-| | |
-|---|---|
-| **Two independent halves** | SDR affects the Steam interface and non-HDR games; HDR affects only games actually running in HDR |
-| **SDR runs 100-300%** | 100% is neutral. The same range on every panel, whatever has to happen underneath to deliver it |
-| **HDR runs 100-150%** | A ceiling set by the maths rather than by gamescope |
-| **Both sliders show their own limit** | Each marks where its range stops being free, so you see it coming rather than walk into it |
-| **It survives a suspend** | gamescope forgets these settings when it re-initialises, so the plugin watches for a resume and puts both halves back |
-| **Settings are restored** | Turning a half off restores its captured baseline; failed restores remain visible and are retried while the plugin is running |
-| **Neither slider goes below 100%** | Both bottom out at neutral |
-| **Built-in panel only** | The plugin stands down while an external display is connected |
-| **The HDR half can be absent** | Not drawn at all on a panel whose EDID never mentions PQ, since it could never take effect there |
-| **A short pause when a slider settles** | Building the HDR lookup table takes about a fifth of a second, so it happens once you stop moving, and the panel says so |
+Decky Vibrance HDR changes colour saturation on the built-in screen through
+[gamescope](https://github.com/ValveSoftware/gamescope). SDR and HDR have separate
+saved choices. Enabled settings continue working while the Quick Access Menu is closed.
 
----
+| Control | What it does |
+|---|---|
+| **SDR saturation** | Adjusts the Steam interface and games not running in HDR, from 100–300% |
+| **HDR saturation** | Adjusts games running in HDR, from 100–150%; shown when the panel is not known to lack HDR support |
+| **Enabled** | Turns each effect on or off independently and releases its display adjustment when switched off |
+| **Back to defaults** | Switches both effects off and returns both sliders to 100% |
+| **Updates** | Checks for a release and downloads its installable ZIP; keeps progress and results when the menu is reopened |
+
+The menu explains clipping limits and failed changes. Background checks reapply
+enabled settings after detected gamescope/session recovery. Adjustments pause while
+an external display is active and return when the built-in screen is active again.
 
 ## Requirements
 
 | Requirement | Details |
 |---|---|
-| Compositor | gamescope in Game Mode, driving the built-in panel |
+| Environment | SteamOS or a compatible gamescope-based Game Mode, driving the built-in screen |
 | Plugin loader | [Decky Loader](https://decky.xyz) |
-| Privileges | none, runs as the normal user |
+| Display interfaces | gamescope's colour controls and `xprop`; panel metadata determines the SDR mapping and HDR availability |
+| Privileges | Runs as the normal user; no root flag is required |
 
-> [!NOTE]
-> **Not tied to one handheld.** Which mapping applies is read from the panel's EDID rather
-> than from the model name, so any display gamescope drives is handled on its own terms.
-> Confirmed on a Legion Go 2 (OLED, wide gamut, HDR) and a Legion Go S (LCD, standard
-> gamut), where the HDR half does not appear at all because the panel never declares PQ.
+The plugin chooses its display mapping from panel information rather than the device
+name. It does not enable HDR in a game or apply its built-in-screen settings to an
+external monitor.
 
----
+The latest fixes were checked on these devices:
+
+| Device | Environment and coverage |
+|---|---|
+| **Legion Go 2** | Ordinary x86-64 SteamOS; wide-gamut SDR, HDR, real menu input and backend/display readback |
+| **Odin 3** | Armada with Decky running through FEX; SDR/HDR colour tables, native ARM calculation and mounted menu handlers |
+
+Earlier project checks also covered **Legion Go S** with a standard-gamut LCD.
+Its panel does not advertise HDR, so the HDR section is hidden. It was not retested
+in the latest fix audit. See [validation and device limits](#validation-and-device-limits)
+for the exact scope of the latest checks.
 
 ## Installation
 
-**1.** Install [Decky Loader](https://decky.xyz) if you haven't already.
-**2.** Download `DeckyVibranceHDR-x.x.x.zip` from the [Releases](../../releases) page.
-**3.** In Gaming Mode, open the **Quick Access Menu** (the `…` button).
-**4.** Open the Decky menu, scroll to the bottom, then **Developer → Install Plugin from ZIP**.
-**5.** Select the downloaded zip.
+1. Install [Decky Loader](https://decky.xyz) if you do not already have it.
+2. Download `DeckyVibranceHDR-<version>.zip` from [Releases](https://github.com/Rayekkk/DeckyVibranceHDR/releases). Choose the attached plugin ZIP.
+3. In Game Mode, open **Quick Access Menu → Decky → Settings → Developer**.
+4. Choose **Install Plugin from ZIP** and select the archive.
+5. Open **Decky Vibrance HDR** in Decky.
+
+Normal use needs no terminal commands. To make your own package, follow
+[Development](#development).
+
+**Version 1.1.1:** see [CHANGELOG.md](CHANGELOG.md) for the fixes in this version
+and earlier releases. The release badge and download links follow published releases.
+
+### Updating
+
+1. Open **Updates → Check for updates**.
+2. If a newer release is available, choose **Download v<version>**.
+3. Wait for **Downloaded** and note the completed file path.
+4. Follow the menu's instructions: uninstall the existing plugin in Decky while keeping its settings, then use **Developer → Install Plugin from ZIP** to install that file.
+5. Reopen the plugin and check your saved choices.
+
+**Downloading does not install the update.** Settings are stored outside the installed
+plugin folder and are retained when that folder is replaced. Keep the saved settings
+when uninstalling for an update.
+
+Checks and downloads continue if you leave the panel. Reopening shows the pending
+operation, result or error without starting another request. You can also download
+and install the release ZIP manually. The updater offers published releases.
+
+## Usage
+
+### Quick start
+
+1. Open **Decky Vibrance HDR** in the Quick Access Menu.
+2. Turn on **Enabled** under **SDR saturation** or **HDR saturation**.
+3. Start at **100%**, then increase **Saturation** until you like the result.
+4. Let the change finish and check **Now**, the HDR **Last LUT sent** status and any error.
+
+The slider shows your latest selection immediately. Applying it can take longer,
+especially when a colour table is being built. The menu shows **building the LUT...**
+while that work is running. Recent edits are grouped so an older selection does not
+keep delaying the one you want.
+
+### SDR saturation
+
+SDR affects the Steam interface and games that are not using HDR. **100%** adds no
+saturation boost from this plugin; larger values make colours more saturated.
+These percentages are adjustment levels, not a measurement of the panel's gamut.
+
+The current build provides **100–300%**. The useful range depends on the panel:
+wide-gamut screens show a clipping warning above **200%**, while standard-gamut
+screens using the additional colour table warn above **260%**. Beyond the warning,
+saturated colours can lose detail. Use the message beside the slider as your guide.
+
+### HDR saturation
+
+HDR affects only content already running in HDR. The range is **100–150%**, with a
+clipping warning above **130%**. It does not turn an SDR game into an HDR game.
+
+Above 100%, the plugin builds a colour lookup table (LUT) for gamescope. **Now** is
+your requested value; **Last LUT sent** is the last value successfully handed to
+gamescope. They can differ while building or retrying. This status confirms the
+handoff, not a physical measurement of the game's image. Build time varies with
+the device and workload.
+
+The section is hidden when complete panel information says HDR/PQ is unsupported.
+If panel information is unavailable, the control may remain visible; its presence
+alone is not proof that the game or screen is displaying HDR.
+
+### Turning effects off and resetting
+
+Turning **Enabled** off releases that effect and restores its captured display
+setting. A newer colour table supplied by another tool is preserved. If SDR was
+already enabled at startup and its earlier baseline is unknown, it returns to
+gamescope's native-gamut default.
+
+**Back to defaults** switches both effects off and sets both sliders to 100%.
+It also cancels older changes that have not yet been sent. Restoration failures
+stay visible and are retried while the plugin is running.
+
+### Status and recovery
+
+**Backend unavailable** describes a connection problem; **Plugin not ready** shows
+why startup cannot finish. **Could not load settings** keeps controls paused and
+preserves the saved file. **Settings not saved** means the latest choices could not
+be written to disk. **Could not apply the setting** reports SDR/HDR display errors
+separately.
+
+Let an operation finish before judging the image. If a request is still waiting
+for Decky, reopening the panel keeps that request's place rather than sending a
+second copy. Use **Retry** when offered once the backend can respond again.
+
+## Troubleshooting
+
+| What you see | What to do |
+|---|---|
+| Backend unavailable or Plugin not ready | Read the reason, allow startup to finish and confirm Game Mode is active. Use Retry when offered. If Decky itself no longer responds, restart Decky; that also reloads its other plugins. |
+| Could not load settings | Keep the saved file. Resolve the reported file-access or invalid-JSON problem; the plugin retries loading instead of saving defaults over it. |
+| Settings not saved | Check the reported storage/permission error. The current selection may still be active, but it has not been confirmed saved. |
+| Could not apply the setting | Read the SDR, SDR look or HDR error. Allow recovery to retry, then check the applied status. |
+| Conflict or colours keep changing | Avoid overlapping colour controls such as vibrantDeck. Another tool can overwrite SDR settings or an SDR/HDR colour table; keep one tool controlling the same effect. |
+| The HDR section is missing | Check whether the built-in panel advertises HDR/PQ. This is expected on the standard Legion Go S LCD. |
+| HDR changes do not affect a game | Confirm the game is actually running in HDR and check Last LUT sent. The plugin does not enable a game's HDR mode. |
+| External display → Standing down | Adjustments are paused for the external screen. Return to the built-in display to resume the saved choices. |
+| building the LUT... or an older Last LUT sent value | Wait for the latest build. If it stays pending, check the error and backend connection; build time is not fixed across devices. |
+| An update check or download failed | Read the error and try again, or download the attached plugin ZIP from Releases and install it through Decky. |
+| Reloading takes several seconds | Decky 3.2.10 showed a loader shutdown issue during audits on both devices. Version 1.1.1 does not patch that loader issue. See the device report for the reproduced limitation. |
+
+When reporting a problem, include the plugin version, device, SteamOS/Armada and
+Decky versions, the affected control and its exact status/error.
+
+## How it works
 
 <details>
-<summary><b>Building from source</b></summary>
+<summary><b>Display interfaces, colour tables and recovery</b></summary>
 
-<br>
+The plugin reads gamescope's panel metadata and adjusts X11 properties rather than
+changing panel firmware.
 
-Requires Node.js 18+.
+| Path | Interface | Behaviour |
+|---|---|---|
+| SDR on a wide-gamut panel | `GAMESCOPE_COLOR_SDR_GAMUT_WIDENESS` | The scalar control carries the 100–300% range |
+| SDR on a standard-gamut panel | The same scalar plus `GAMESCOPE_COLOR_LOOK_G22` | The scalar carries 100–200%; a gamma-2.2 colour table carries the rest |
+| HDR | `GAMESCOPE_COLOR_LOOK_PQ` | A PQ colour table adjusts HDR content |
+
+Both colour tables keep a **33³ grid**. HDR calculations use PQ-encoded BT.2020
+and ICtCp to adjust chroma while preserving intensity and chroma direction before
+clipping. SDR uses the corresponding gamma-2.2 path, source-gamut conversion and
+panel white-point adaptation. See [vibrance_lut.py](vibrance_lut.py) for the maths.
+
+Recent completed tables and invariant conversion work are cached. Generation runs
+outside the control lock; obsolete jobs are cancelled, and files are published
+atomically. Panel information is cached and refreshed when its identity changes.
+Background monitoring detects session/display recovery and retries failed applies
+or restorations while retaining ownership information.
+
+On Armada systems with x86-64 Decky under FEX, executable architecture checks select
+native system Python and `xprop` where supported. Ordinary x86-64 SteamOS keeps its
+existing path. This changes execution overhead, not LUT resolution or colour maths.
+
+Settings live in Decky's settings directory, outside the installed plugin folder.
+Startup validates them before accepting edits; a failed read keeps the file intact.
+The frontend keeps one outstanding read and one write at a time, coalesces unsent
+slider edits and prioritises disable/reset over older unsent changes.
+
+</details>
+
+## Development
+
+<details>
+<summary><b>Build, test and package from source</b></summary>
+
+Use Node.js **22** (the CI version), Python **3.10+** for backend tests, and a ZIP
+tool: `zip` on Linux/macOS or 7-Zip on Windows.
 
 ```bash
 git clone https://github.com/Rayekkk/DeckyVibranceHDR
 cd DeckyVibranceHDR
-
-npm install
-npm run build      # bundles src/index.tsx into dist/
-npm run package    # produces DeckyVibranceHDR-<version>.zip
-```
-
-Then install the resulting zip through Decky's **Install Plugin from ZIP**, which is the
-supported path and avoids permission problems.
-
-</details>
-
----
-
-## Usage
-
-Open the **Quick Access Menu** and tap the plugin icon. There are two toggles and two
-sliders, one pair per half, and nothing else to configure.
-
-Turning a half off restores the settings captured when it took control. SDR captures the
-current value on each enable. If SDR was already enabled at plugin startup and the old
-baseline is unknown, disabling it returns gamescope to its native-gamut default.
-
-Failed changes are retried automatically. SDR and HDR keep separate error messages, and the
-HDR status shows the last LUT successfully sent, which can differ from the requested slider
-value while a retry is pending. Sending a LUT is not confirmation that gamescope loaded it.
-
----
-
-## How it works
-
-gamescope exposes its controls as X11 properties, called *atoms*. Both halves of this plugin
-work by writing to them; what differs is how much gamescope is willing to give.
-
-### SDR
-
-This is the easy half, because a dial already exists. The complication is that it does not
-mean the same thing on every panel, and sorting that out is most of the work.
-
-`GAMESCOPE_COLOR_SDR_GAMUT_WIDENESS` moves the source colorimetry between Rec.709 at `0.0`
-and the panel's native gamut at `1.0`. On a wide-gamut panel that runs in u'v' and nothing
-clamps the parameter, so above `1.0` it keeps going in the same direction and places the
-primaries outside the panel. It is a single float, and writing it is the whole feature.
-
-That is one of two branches gamescope can take. On the other, the same parameter is numbered
-differently: `0.0` is native, `0.5` a generic wide gamut with smooth mapping, `1.0` the same
-with harsh mapping, and gamescope clamps it there. Both are usable. The difference that
-matters is where neutral sits: at `1.0` on the first branch, at `0.0` on the second.
-
-So the slider always means the same thing, 100% is neutral and up is more saturated, while
-the mapping underneath follows the panel:
-
-| Panel | Slider | Atom | Look |
-|---|---|---|---|
-| **Wide gamut** | 100-300% | 1.0-3.0 | never written |
-| **Standard gamut** | 100-300% | 0.0-1.0 over the first 100 points | 1.0-1.5 over the rest |
-
-On the standard branch that clamp lands at what the slider calls 200%, so past it there is
-nothing left for the parameter to push. The rest of the range is carried by
-`GAMESCOPE_COLOR_LOOK_G22`, the SDR twin of the slot the HDR half uses, generated in the
-gamma 2.2 domain by the same ICtCp code.
-
-That look converts gamescope's generic wide-gamut source to BT.2020 before ICtCp and back
-afterwards. The panel's white point is read from EDID and adapted to D65 during the
-adjustment, with D65 as the fallback when white metadata is unavailable. This preserves
-intensity and chroma direction before the final clipping step.
-
-A wide-gamut panel never reaches that: its parameter covers the whole slider, and no look is
-written at all.
-
-> [!NOTE]
-> Which branch applies is decided by gamescope's own `BIsWideGamut()` test, red `x > 0.650`
-> and `y < 0.320`, run against the EDID published in `GAMESCOPE_DISPLAY_EDID_PATH`.
-> Measured: a Legion Go 2 OLED is 0.6836/0.3154 and passes; a Legion Go S LCD is
-> 0.6523/0.3408 and fails on `y` after passing `x` by a hair. An EDID that cannot be read
-> falls back to the wide-gamut mapping.
-
-### HDR
-
-This is the hard half, because there is nothing to turn. In `create_color_mgmt_luts()` the PQ
-path calls `buildPQColorimetry()`, which sets the input to BT.2020 and **zeroes the gamut
-remap**. That is deliberate, not an oversight.
-
-What the PQ path does accept is a *look*, gamescope's term for a colour lookup table it
-applies to the image. `GAMESCOPE_COLOR_LOOK_PQ` holds a path to a `.cube` file used for HDR
-content only, so this plugin generates that file itself.
-
-> [!WARNING]
-> Past about 130% an HDR boost hard-clips channels at the gamut boundary and takes saturated
-> detail with them. That is why the ceiling sits at 150% rather than higher.
-
-<details>
-<summary><b>Why the maths is not trivial</b></summary>
-
-<br>
-
-The look is applied where it is, not where you would assume. From `color_helpers.cpp`:
-
-```c
-sourceColorEOTFEncoded = ApplyLut3D_Tetrahedral( *pLook, sourceColorEOTFEncoded );
-sourceColorLinear      = calcEOTFToLinear( sourceColorEOTFEncoded, sourceEOTF, ... );
-```
-
-The LUT runs on values that are still **encoded**, before linearisation and before any
-tonemapping or gamut mapping. On the HDR path that means its domain and range are both
-PQ-encoded BT.2020 in `0..1`.
-
-PQ is violently non-linear, so scaling distance from grey in place would drag lightness and
-hue around, worst exactly in the bright saturated areas HDR exists for. Each LUT entry
-therefore decodes PQ to linear, converts to **ICtCp** (ITU-R BT.2100), scales the two chroma
-axes and leaves ICtCp intensity and chroma direction alone, then converts back.
-Clipping at the gamut boundary can still change perceived lightness or hue.
-
-Black maps to black by construction, which keeps gamescope's `bRaisesBlackLevelFloor` false.
-
-</details>
-
-### Staying applied
-
-gamescope drops these atoms when it re-initialises, so the plugin watches for a resume by
-comparing `CLOCK_MONOTONIC`, which stops while the machine sleeps, against `CLOCK_BOOTTIME`,
-which does not. Both halves then go back several times over, because gamescope can clobber
-them while it is still starting. A value dropped any other way is restored by the same watch
-within a few seconds; only a value that keeps being overwritten is reported as a conflict.
-
----
-
-## Troubleshooting
-
-<details>
-<summary><b>The panel says another plugin is fighting for the SDR atom</b></summary>
-
-<br>
-
-vibrantDeck writes the same `GAMESCOPE_COLOR_SDR_GAMUT_WIDENESS` atom. Two plugins pushing
-one value produces behaviour that looks like a bug in both, so this plugin watches for it
-and says so rather than letting you chase it.
-
-Keep one of them enabled, not both. The HDR half does not conflict with anything, since
-nothing else uses the PQ look slot.
-
-</details>
-
-<details>
-<summary><b>There is no HDR half at all</b></summary>
-
-<br>
-
-Expected on a panel whose EDID does not advertise SMPTE ST 2084. The HDR half works by
-handing gamescope a look on the PQ path, and on such a panel that path is never taken, so the
-control would do nothing whatever it was set to.
-
-That block can sit either in a CTA-861 extension or inside a DisplayID one, so both are
-searched. An EDID that cannot be read at all is treated differently and leaves the half in
-place: ignorance is not a no, but a complete EDID that never mentions PQ is.
-
-</details>
-
-<details>
-<summary><b>Nothing happens after plugging in an external display</b></summary>
-
-<br>
-
-Also expected. Every number here was measured against the built-in panel, so the plugin
-stands down while an external display is being driven and brings the settings back when it
-goes away. `GAMESCOPE_DISPLAY_IS_EXTERNAL` is checked on a timer, so docking and undocking
-are noticed without restarting anything.
-
-</details>
-
----
-
-## Development
-
-```bash
 npm ci
-npm run build        # bundles src/index.tsx into dist/
-npm run typecheck    # TypeScript check with no emit
-npm test             # frontend ordering and optimistic-state regressions
-npm run package      # rebuilds frontend and creates the installable zip
-npm run verify:package # checks ZIP contents and the built Decky API contract
+npm run typecheck
+npm test
+python -W error -m unittest discover -s tests -v
+npm run package
+npm run verify:package
 npm audit --audit-level=low
-
-python -m unittest discover -s tests -v
 ```
 
-`tests/test_logic.py` runs anywhere, including CI. It checks the PQ transfer round trip
-against a 10-bit code value, that unity saturation is exactly identity, that black stays
-black and greys stay neutral, that output never leaves the unit cube, and that the `.cube`
-file has the layout gamescope's loader assumes, red changing fastest, which if wrong
-scrambles the image rather than failing loudly.
+**Package rebuilds the frontend** and creates `DeckyVibranceHDR-<version>.zip`.
+Install that ZIP through Decky. The package includes the bundled `@decky/api`
+source, license and source map; React and `@decky/ui` come from the Decky host.
+See [NOTICE](NOTICE) for component provenance.
 
-`tests/test_recovery.py` additionally exercises failed applies and resets, baseline
-recapture, missing SDR properties and the SDR source-gamut conversion. These are host-side
-tests; they do not replace checking color output, suspend/resume and docking on a handheld.
+GitHub Actions uses Linux/Python 3.13 and Node.js 22 for backend/frontend tests,
+version checks, dependency audit, typecheck, build and ZIP verification. It uploads
+a build artifact; it does not publish a release. POSIX-specific tests skip on Windows.
+To measure LUT generation locally, use `python scripts/benchmark_lut.py`.
 
-`tests/test_audit_regressions.py` covers coalesced/cancelled LUT work, atomic settings,
-disk failures, unload flush, session rediscovery, EDID validation and safe downloads.
-`tests/test_full_audit.py` covers EDID replacement at a stable path, SDR restore values
-through panel changes, inactive LUT slots, slow HTTP bodies, escaped filenames and
-ZIP verification with optimized Python. Panel metadata is probed outside the control
-lock, so slow reads do not block slider mutations. Unchanged EDID files remain cached.
-`tests/test_quality_round3.py` covers other-server probe latency, shutdown probe
-timeouts, accepted saturation persistence, SemVer precedence and quoted XDG paths.
-Other X server probes run outside the control lock. During unload, gamescope
-reachability and property operations share the shortened timeout.
-`tests/test_quality_round4.py` covers redundant slider values, retries without
-value changes, uninterrupted equivalent builds, overlapping update checks and
-foreign LUT changes during replacement, monitoring and resume. An unchanged
-healthy slider value does not save or reapply; failed settings and applies can
-still be retried. Newly observed foreign LUTs are remembered before replacing
-or reasserting the plugin's look, so disable/reset restores the latest baseline.
-`tests/test_quality_round5.py` covers slow settings writes, generation-aware save
-acknowledgements, unload behind an older write, single-query panel monitoring and
-completed LUT reuse through SDR/HDR RPCs. Ordinary settings saves use immutable
-snapshots outside the control lock, so disk latency does not delay disable/reset
-or subsequent slider requests. The UI reports persistence failures on its next
-state refresh, and unload waits for the final settings write. Panel monitoring
-uses one root-property dump for session health and display metadata.
-`tests/test_quality_round6.py` covers failed reasserts, pending neutral clears,
-independent production LUT hashes, malformed ZIP names and X session recovery.
-The backend retains restore values while rediscovering gamescope and preserves
-them when the local X socket identity matches. A replaced socket, even at the
-same DISPLAY, starts fresh ownership. Restore checks a known socket identity
-immediately, including before the next monitor tick; a disconnected unidentified server cannot
-receive a retained restore. Healthy LUTs survive a same-session reconnect without
-rebuilding, while a changed panel configuration rebuilds the SDR look. Reassert
-failures are reported, and retries respect a pending neutral request.
-`tests/test_quality_round7.py` covers unload during startup's writer wait, TLS
-setup and settings read. Shutdown preserves settings that startup has not yet
-loaded; completing an interrupted startup cannot reenable LUT writes or launch
-new background tasks. Once settings are loaded, shutdown still flushes edits.
-The frontend queues one write at a time, coalesces unsent slider changes and repeated
-toggle intents, and gives disable/reset priority. Reset also removes older unsent
-toggles. Slow reads are retried with a visible connection error; a slow
-write is shown as pending and retains ordering until Decky reports its result.
+</details>
 
-The LUT keeps its 33³ grid. A bounded cache holds two input ICtCp grids, keyed by transfer
-and source white, so repeated saturation changes reuse the invariant part of the transform.
-The two HDR and two SDR files also retain their completed LUTs. Returning to a
-previous value can reuse the requested inactive slot if its parameters and file
-identity still match. Four metadata records bound this cache; it stores no LUT
-text in memory. New values still use the existing debounce and full-resolution build.
-Transfer functions handle their own lower boundary, avoiding duplicate clamps
-at every LUT node. Independent full-size hashes protect clipping and white-point
-adaptation, and comparison with the prechange generator retains identical bytes.
-Run `python scripts/benchmark_lut.py` for host timing, or add `--reference-ref <commit>`
-to compare byte-for-byte output and paired timings with a local Git revision.
+### Validation and device limits
 
-`lego_updater.py` originated in the author's other plugins. Audit fixes in this checkout
-are maintained separately. The ZIP includes the exact @decky/api library source and
-licence under `third_party/decky-api/`; React and @decky/ui use Decky's host globals.
-Update HTTP bodies are read incrementally with time and size checks between reads.
-Each socket idle wait is limited to five seconds; release metadata is limited to 1 MiB
-and the installable ZIP to 32 MiB. Network setup and the final blocking read can extend
-the elapsed time beyond the body deadline.
-Release comparison follows SemVer precedence, retaining prerelease and build
-suffixes in ZIP names. XDG download paths support quoted escapes and literal dollars;
-invalid or unreadable configuration falls back to the host user's Downloads folder.
-When update checks overlap across panel openings, only the newest check can
-authorize its advertised ZIP for download.
+<details>
+<summary><b>Audit reports and what was tested</b></summary>
+
+- [Final Legion regression and renewed Odin validation](docs/FULL_AUDIT_2026-10-11_LEGION_REGRESSION.md): settings/startup fixes, ordinary SteamOS and Armada checks, final payload comparisons, menu/backend measurements and independent device verification.
+- [Round-9 quality audit](docs/FULL_AUDIT_2026-10-10_ROUND9.md): frontend request ordering, saved settings and updater remount regressions.
+- [Odin audit](docs/FULL_AUDIT_2026-10-10_ODIN3.md): blocking metadata reads, native-worker checks and Decky lifecycle diagnosis.
+- [Earlier Armada performance work](docs/FIX_ARMADA_RESPONSIVENESS_2026-10-10.md): native ARM LUT and `xprop` execution.
+
+The underlying fixes were checked on the devices before the version-only 1.1.1
+bump. The latest Odin menu checks used the actual mounted controls' handlers;
+Legion also used native simulated keyboard input. These are not physical gamepad,
+colorimeter or HDR-game output checks. Sleep/wake and docking were not exercised
+in the latest round. Automated tests and readable LUT files do not replace those
+physical scenarios. Earlier report versions, hashes and timings are historical.
+
+</details>
 
 ---
 
 ## Credits
 
-- [vibrantDeck](https://github.com/libvibrant/vibrantDeck) by Scrumplex, LGPL-3.0 - prior art for the SDR half, no code used; see [NOTICE](NOTICE)
-
----
+- [vibrantDeck](https://github.com/libvibrant/vibrantDeck) by Scrumplex, LGPL-3.0 — prior art for the SDR path and resume detection; no code used. See [NOTICE](NOTICE).
+- [gamescope](https://github.com/ValveSoftware/gamescope) and [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) — the display interfaces and plugin host.
 
 ## License
 
-BSD 3-Clause - see [LICENSE](LICENSE). Third-party components are listed in [NOTICE](NOTICE).
+BSD 3-Clause — see [LICENSE](LICENSE). Third-party components, including the bundled
+LGPL-2.1 `@decky/api`, are listed in [NOTICE](NOTICE).
 
 ---
 
@@ -356,16 +278,3 @@ BSD 3-Clause - see [LICENSE](LICENSE). Third-party components are listed in [NOT
 *Vibe coded with the help of [Claude](https://claude.ai) 🤖*
 
 </div>
-
-### Armada on ARM devices
-
-When Decky runs as an x86-64 executable under FEX on an ARM system, the plugin
-uses the native system Python for LUT calculation and native xprop through
-posix_spawn. It detects this case from executable ELF architecture headers;
-ordinary x86-64 SteamOS retains its existing execution path. No LUT resolution
-or color math is changed. Obsolete native workers are killed and reaped.
-
-On Odin 3, measured end-to-end saturation updates took about 0.57-0.59 seconds
-for HDR and 0.66-0.69 seconds for SDR, including debounce. Disabling during an
-active build took 41 ms for HDR and 121 ms for SDR. These are device measurements,
-not worst-case guarantees. See [the device validation report](docs/FIX_ARMADA_RESPONSIVENESS_2026-10-10.md).

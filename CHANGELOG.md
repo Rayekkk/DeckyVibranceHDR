@@ -2,6 +2,45 @@
 
 All notable changes to Decky Vibrance HDR, newest first.
 
+## [1.1.1] - 2026-10-11
+
+### Fixed
+
+#### Settings and startup
+
+- Protected saved settings when the plugin cannot read them or Decky stops
+  during startup. Controls now wait for settings to load instead of replacing
+  your choices with defaults.
+- Prevented startup and display checks from getting stuck on invalid settings
+  or display-information files.
+- Startup errors now explain what failed. A settings-file problem is no longer
+  described as a missing Game Mode connection or a failed save.
+
+#### Menu and connection recovery
+
+- Slow or missing backend replies no longer let repeated status checks build up
+  a queue of requests.
+- Status checking resumes when the pending call finishes, keeping newer choices
+  made after reopening the menu or using **Back to defaults**.
+
+#### Updates
+
+- Update checks and downloads keep their progress when you close and reopen
+  the Quick Access Menu. Completed download paths and errors remain available.
+- Reopening the menu no longer starts duplicate update requests. Buttons from
+  a closed menu cannot start another operation, and the installed version is
+  reused instead of fetched again each time.
+
+### Quality checks
+
+- Added regressions for startup/settings failures, files that could block reads,
+  slow replies, menu reopening and update results.
+- Checked the fixes on Legion Go 2 with SteamOS and Odin 3 with Armada, including
+  real backend calls and colour-table output. See the [device audit](docs/FULL_AUDIT_2026-10-11_LEGION_REGRESSION.md)
+  for the methods and limits. Version 1.1.1 keeps the same audited runtime;
+  these changes do not fix Decky's own reload issue or claim new physical
+  controller, sleep/wake or docking tests.
+
 ## [1.1.0] - 2026-10-10
 
 ### Fixed
