@@ -22,11 +22,10 @@ visibly, in exactly the bright saturated areas the adjustment exists for. Each
 entry therefore decodes to linear, changes saturation in a space built for it,
 and re-encodes.
 
-The space is ICtCp (ITU-R BT.2100). Dolby designed it so that scaling the two
-chroma axes leaves lightness and hue where they were - which is precisely the
-operation "a saturation slider" is supposed to be. Scaling Ct and Cp is the
-whole adjustment; I is untouched. The PQ inside ICtCp is part of ICtCp and stays
-put whichever transfer the look itself sits behind.
+The space is ICtCp (ITU-R BT.2100). Scaling Ct and Cp preserves I and chroma
+direction before clipping; it does not guarantee unchanged perceived lightness
+or hue once channels hit the gamut boundary. The PQ inside ICtCp is part of
+ICtCp and stays put whichever transfer the look itself sits behind.
 
 The G22 look also converts gamescope's generic wide-gamut source primaries to
 BT.2020 before ICtCp, then back before clipping. Its native white is adapted to
@@ -37,9 +36,11 @@ bRaisesBlackLevelFloor false (it drives cv_overlay_unmultiplied_alpha).
 """
 
 from functools import lru_cache
+from collections import OrderedDict
 import math
+import threading
 
-# ── PQ (SMPTE ST 2084) ─────────────────────────────────────────────────────────
+# â”€â”€ PQ (SMPTE ST 2084) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # Absolute, with 1.0 encoded meaning 10000 nits.
 
 _M1 = 2610.0 / 16384.0
@@ -76,7 +77,7 @@ def linear_to_pq(y: float) -> float:
     return ((_C1 + _C2 * ym) / (1.0 + _C3 * ym)) ** _M2
 
 
-# ── Gamma 2.2, for the SDR look ────────────────────────────────────────────────
+# â”€â”€ Gamma 2.2, for the SDR look â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # The same look mechanism exists on the SDR path as GAMESCOPE_COLOR_LOOK_G22, and
 # it sits in the same place in the pipeline - but there sourceEOTF is Gamma22, so
 # the domain is gamma-encoded and *relative*, not absolute like PQ.
@@ -105,7 +106,7 @@ def linear_to_g22(y: float) -> float:
     return (y * (10000.0 / SDR_REFERENCE_NITS)) ** (1.0 / _GAMMA)
 
 
-# ── ICtCp (ITU-R BT.2100) ──────────────────────────────────────────────────────
+# â”€â”€ ICtCp (ITU-R BT.2100) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 # BT.2020 linear RGB -> LMS, then PQ on LMS, then the ICtCp matrix.
 
 _RGB_TO_LMS = (
@@ -197,45 +198,108 @@ TRANSFERS = {
 def saturate(rgb_encoded, saturation: float, encoding: str = "pq",
              source_white=D65):
     """One LUT entry, in and out in whichever transfer the look sits behind."""
+    if not isinstance(saturation, (int, float)) or isinstance(saturation, bool) \
+            or not math.isfinite(saturation) or saturation < 0:
+        raise ValueError("saturation must be a finite nonnegative number")
+    if encoding not in TRANSFERS:
+        raise ValueError(f"unknown encoding {encoding!r}")
     if saturation == 1.0:
         return rgb_encoded
-    try:
-        decode, encode = TRANSFERS[encoding]
-    except KeyError:
-        raise ValueError(f"unknown encoding {encoding!r}") from None
+    return _from_ictcp(_to_ictcp(rgb_encoded, encoding, source_white),
+                       saturation, encoding, source_white)
 
+
+def _to_ictcp(rgb_encoded, encoding, source_white):
+    decode, _encode = TRANSFERS[encoding]
     linear = tuple(decode(c) for c in rgb_encoded)
-    if encoding == "g22":
-        to_2020, from_2020 = _g22_matrices(tuple(source_white))
+    to_2020 = _g22_matrices(tuple(source_white))[0] if encoding == "g22" else None
+    return _linear_to_ictcp(linear, to_2020)
+
+
+def _linear_to_ictcp(linear, to_2020):
+    if to_2020 is not None:
         linear = _mul3(to_2020, linear)
     lms = _mul3(_RGB_TO_LMS, linear)
-    # Negative LMS can only come from out-of-gamut input; PQ is undefined there.
-    lms_pq = tuple(linear_to_pq(max(c, 0.0)) for c in lms)
+    # The encoder already maps negative LMS (out-of-gamut input) to black.
+    lms_pq = tuple(linear_to_pq(c) for c in lms)
 
     i, ct, cp = _mul3(_LMS_TO_ICTCP, lms_pq)
+    return i, ct, cp
+
+
+def _output_transform(encoding, source_white):
+    decode, encode = TRANSFERS[encoding]
+    from_2020 = _g22_matrices(tuple(source_white))[1] if encoding == "g22" else None
+    return encode, decode(1.0), from_2020
+
+
+def _from_ictcp(value, saturation, encoding, source_white, transform=None):
+    encode, ceiling, from_2020 = transform or _output_transform(encoding, source_white)
+    i, ct, cp = value
     ct *= saturation
     cp *= saturation
 
     lms_pq = _mul3(_ICTCP_TO_LMS, (i, ct, cp))
-    lms = tuple(pq_to_linear(max(c, 0.0)) for c in lms_pq)
+    lms = tuple(pq_to_linear(c) for c in lms_pq)
     linear = _mul3(_LMS_TO_RGB, lms)
-    if encoding == "g22":
+    if from_2020 is not None:
         linear = _mul3(from_2020, linear)
 
     # Clamp after the round trip: raising saturation pushes colours outside the
     # cube, and gamescope's tetrahedral interpolation expects 0..1. The ceiling
     # is in linear terms, so it is wherever this transfer puts encoded 1.0.
-    ceiling = decode(1.0)
-    return tuple(encode(min(max(c, 0.0), ceiling)) for c in linear)
+    # Both encoders already map nonpositive linear values to black. Keep the
+    # upper clamp here; duplicating the lower clamp costs three calls per node.
+    return tuple(encode(min(c, ceiling)) for c in linear)
+
+
+class BuildCancelled(Exception):
+    """A newer request superseded this build; no file should be published."""
+
+
+_grids = OrderedDict()
+_grid_lock = threading.Lock()
+
+
+def _prepared_grid(size, encoding, source_white, cancelled):
+    key = (size, encoding, tuple(source_white))
+    with _grid_lock:
+        if key in _grids:
+            _grids.move_to_end(key)
+            return _grids[key]
+    step = 1.0 / (size - 1)
+    decoded = [TRANSFERS[encoding][0](c * step) for c in range(size)]
+    to_2020 = _g22_matrices(tuple(source_white))[0] if encoding == "g22" else None
+    nodes = []
+    for b in range(size):
+        if cancelled():
+            raise BuildCancelled()
+        for g in range(size):
+            for r in range(size):
+                nodes.append(_linear_to_ictcp((decoded[r], decoded[g], decoded[b]), to_2020))
+    # Only production-size grids are retained. Two cover PQ and the current G22
+    # white point, with bounded memory even when panels or sizes change.
+    if size == 33:
+        with _grid_lock:
+            _grids[key] = nodes
+            _grids.move_to_end(key)
+            while len(_grids) > 2:
+                _grids.popitem(last=False)
+    return nodes
 
 
 def generate(saturation: float, size: int = 33, encoding: str = "pq",
-             source_white=D65) -> str:
+             source_white=D65, *, cancelled=lambda: False) -> str:
     """A complete .cube file as text. R changes fastest, as gamescope expects."""
-    if not 2 <= size <= 128:
+    if not isinstance(size, int) or isinstance(size, bool) or not 2 <= size <= 128:
         raise ValueError("gamescope accepts LUT_3D_SIZE between 2 and 128")
     if encoding not in TRANSFERS:
         raise ValueError(f"unknown encoding {encoding!r}")
+    saturate((0, 0, 0), saturation, encoding, source_white)
+    if encoding == "g22":
+        _white_xyz(source_white)
+    grid = None if saturation == 1 else _prepared_grid(size, encoding, source_white, cancelled)
+    transform = _output_transform(encoding, source_white)
 
     step = 1.0 / (size - 1)
     out = [
@@ -247,9 +311,12 @@ def generate(saturation: float, size: int = 33, encoding: str = "pq",
         "",
     ]
     for b in range(size):
+        if cancelled():
+            raise BuildCancelled()
         for g in range(size):
             for r in range(size):
-                v = saturate((r * step, g * step, b * step), saturation, encoding,
-                             source_white)
+                v = ((r * step, g * step, b * step) if grid is None else
+                     _from_ictcp(grid[b * size * size + g * size + r],
+                                 saturation, encoding, source_white, transform))
                 out.append("%.6f %.6f %.6f" % v)
     return "\n".join(out) + "\n"

@@ -239,10 +239,19 @@ def _drain(coro):
     the value that lands in the state, not about the write that follows.
     """
     async def go():
-        result = await coro
-        for task in list(main.Plugin._tasks):
-            task.cancel()
-        return result
+        from unittest.mock import patch
+        # Each asyncio.run creates a new loop, unlike Decky's single runtime.
+        # Background saves now contend for the lock too; isolate it and await
+        # cancellation before restoring the shared fixture.
+        with patch.object(main.Plugin, "_mutation_lock", asyncio.Lock()):
+            try:
+                return await coro
+            finally:
+                tasks = [task for task in main.Plugin._tasks
+                         if task.get_loop() is asyncio.get_running_loop()]
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
 
     return asyncio.run(go())
 
@@ -256,6 +265,10 @@ class Setters(unittest.TestCase):
 
     def setUp(self):
         self.plugin = main.Plugin()
+        from unittest.mock import patch
+        disconnected = patch.object(main.Plugin, "_disconnected", False)
+        disconnected.start()
+        self.addCleanup(disconnected.stop)
         main.Plugin._state["sdr_enabled"] = False
         main.Plugin._state["hdr_enabled"] = False
         main.Plugin._state["sdr_max"] = main.SDR_MAX_WIDE
@@ -298,29 +311,26 @@ class SerializedMutations(unittest.TestCase):
 
     def test_sdr_enable_cannot_overtake_disable(self):
         calls = []
-        save_started = threading.Event()
-        let_save_finish = threading.Event()
-        save_count = 0
+        apply_started = threading.Event()
+        let_apply_finish = threading.Event()
         result = {}
-        count_lock = threading.Lock()
         real_save = main.Plugin._save
         real_apply = main.Plugin._apply_sdr
         real_release = main.Plugin._release_sdr
         real_schedule = main.Plugin._schedule_sdr_look
         real_lock = main.Plugin._mutation_lock
+        real_read = main._read_float_atom
         saved_state = dict(main.Plugin._state)
         saved_unloading = main.Plugin._unloading
+        saved_disconnected = main.Plugin._disconnected
+        saved_baseline = main.Plugin._sdr_baseline
 
-        def fake_save():
-            nonlocal save_count
-            with count_lock:
-                save_count += 1
-                number = save_count
-            if number == 1:
-                save_started.set()
-                let_save_finish.wait(2)
+        def fake_save(values=None):
+            pass
 
         def fake_apply():
+            apply_started.set()
+            let_apply_finish.wait(2)
             calls.append("apply")
             main.Plugin._state["sdr_applied"] = True
 
@@ -332,13 +342,13 @@ class SerializedMutations(unittest.TestCase):
         async def scenario():
             plugin = main.Plugin()
             enabling = asyncio.create_task(plugin.set_sdr_enabled(True))
-            while not save_started.is_set():
-                await asyncio.sleep(0.005)
+            self.assertTrue(await asyncio.to_thread(apply_started.wait, 1))
             disabling = asyncio.create_task(plugin.set_sdr_enabled(False))
             await asyncio.sleep(0)
             self.assertFalse(disabling.done())
-            let_save_finish.set()
+            let_apply_finish.set()
             await asyncio.gather(enabling, disabling)
+            await asyncio.gather(*list(main.Plugin._tasks))
             result.update(main.Plugin._state)
 
         main.Plugin._save = staticmethod(fake_save)
@@ -347,6 +357,8 @@ class SerializedMutations(unittest.TestCase):
         main.Plugin._schedule_sdr_look = lambda self: None
         main.Plugin._mutation_lock = asyncio.Lock()
         main.Plugin._unloading = False
+        main.Plugin._disconnected = False
+        main._read_float_atom = lambda atom: 0.8
         main.Plugin._state.update({
             "external_display": False, "sdr_enabled": False,
             "sdr_applied": False,
@@ -354,13 +366,16 @@ class SerializedMutations(unittest.TestCase):
         try:
             asyncio.run(scenario())
         finally:
-            let_save_finish.set()
+            let_apply_finish.set()
             main.Plugin._save = real_save
             main.Plugin._apply_sdr = real_apply
             main.Plugin._release_sdr = real_release
             main.Plugin._schedule_sdr_look = real_schedule
             main.Plugin._mutation_lock = real_lock
             main.Plugin._unloading = saved_unloading
+            main.Plugin._disconnected = saved_disconnected
+            main.Plugin._sdr_baseline = saved_baseline
+            main._read_float_atom = real_read
             main.Plugin._state.update(saved_state)
         self.assertEqual(calls, ["apply", "release"])
         self.assertFalse(result["sdr_enabled"])
@@ -513,6 +528,7 @@ class Reassert(unittest.TestCase):
         self._looks = main.Plugin._reassert_looks_if_dropped
         main.Plugin._reassert_looks_if_dropped = staticmethod(lambda: None)
         main.Plugin._slow_checks = 0
+        main.Plugin._other_writer = False
         main.Plugin._state.update({
             "sdr_enabled": True, "sdr_applied": True,
             "sdr_saturation": 2.0, "conflict": "",
@@ -740,8 +756,8 @@ class CapabilityGating(unittest.TestCase):
         main.settings._store.clear()
 
     def _boot(self, wide, pq, hdr_on=True):
-        main._panel_is_wide_gamut = lambda: wide
-        main._panel_supports_hdr = lambda: pq
+        main._panel_is_wide_gamut = lambda *_args: wide
+        main._panel_supports_hdr = lambda *_args: pq
         # _main reloads these from the settings, so seeding the state is not
         # enough to get an enabled half into the startup path.
         main.settings._store.update({"sdr_enabled": False, "hdr_enabled": hdr_on})
@@ -832,7 +848,7 @@ class PanelDetection(unittest.TestCase):
         blob[0x19] = ((rx & 0x03) << 6) | ((ry & 0x03) << 4)
         blob[0x1B] = rx >> 2
         blob[0x1C] = ry >> 2
-        return bytes(blob)
+        return _harness.valid_edid(blob)
 
     def test_parses_the_panel_this_was_written_for(self):
         # edid-decode reports 0.6835, 0.3154 for the Legion Go 2 panel.
@@ -868,7 +884,7 @@ class HdrCapability(unittest.TestCase):
         base = bytearray(128)
         base[126] = 1 if cta else 0
         if not cta:
-            return bytes(base)
+            return _harness.valid_edid(base)
         block = bytearray(128)
         block[0] = 0x02                      # CTA-861
         block[1] = 3                          # revision
@@ -879,7 +895,7 @@ class HdrCapability(unittest.TestCase):
             block[pos + 1:pos + 1 + len(payload)] = payload
             pos += 1 + len(payload)
         block[2] = pos                        # detailed timings start here
-        return bytes(base + block)
+        return _harness.valid_edid(base + block)
 
     def test_a_panel_advertising_st2084(self):
         # Traditional gamma SDR + SMPTE ST 2084, as the Legion Go 2 reports.
@@ -906,7 +922,7 @@ class HdrCapability(unittest.TestCase):
         base[126] = 1
         displayid = bytearray(128)
         displayid[0] = 0x70
-        self.assertFalse(main._edid_supports_pq(bytes(base + displayid)))
+        self.assertFalse(main._edid_supports_pq(_harness.valid_edid(base + displayid)))
 
     def test_pq_declared_inside_a_displayid_block_is_found(self):
         """CTA data blocks can be carried inside DisplayID, so looking only for
@@ -920,7 +936,7 @@ class HdrCapability(unittest.TestCase):
         displayid[5] = 0x81                           # CTA-861 data block
         displayid[7] = len(cta_payload)
         displayid[8:8 + len(cta_payload)] = cta_payload
-        self.assertTrue(main._edid_supports_pq(bytes(base + displayid)))
+        self.assertTrue(main._edid_supports_pq(_harness.valid_edid(base + displayid)))
 
     def test_a_truncated_edid_is_not_an_answer(self):
         self.assertIsNone(main._edid_supports_pq(b"\x00" * 64))
@@ -928,7 +944,7 @@ class HdrCapability(unittest.TestCase):
     def test_a_block_promising_more_than_it_holds_does_not_read_past_it(self):
         edid = bytearray(self._edid(0b0000_0101))
         edid[128 + 2] = 127                   # collection runs to the very end
-        self.assertIn(main._edid_supports_pq(bytes(edid)), (True, False))
+        self.assertIn(main._edid_supports_pq(_harness.valid_edid(edid)), (True, False))
 
 
 class Environment(unittest.TestCase):
@@ -1228,9 +1244,12 @@ class StartupRetry(unittest.TestCase):
             return None
 
         main._pick_display = flaky
-        main._panel_is_wide_gamut = lambda: True
-        main._panel_supports_hdr = lambda: True
+        main._panel_is_wide_gamut = lambda *_args: True
+        main._panel_supports_hdr = lambda *_args: True
         main._read_float_atom = lambda name: 1.0
+        from unittest.mock import patch
+        count_patch = patch.object(main, "_count_gamescope_atoms", return_value=44)
+        count_patch.start()
         asyncio.sleep = no_wait
         try:
             _drain(main.Plugin()._start_when_ready())
@@ -1238,6 +1257,7 @@ class StartupRetry(unittest.TestCase):
             main._pick_display, asyncio.sleep = real_pick, real_sleep
             main._panel_is_wide_gamut, main._panel_supports_hdr = real_wide, real_pq
             main._read_float_atom = real_read
+            count_patch.stop()
             main.SDR_NEUTRAL_ATOM, main.SDR_ATOM_SPAN = saved
         self.assertEqual(len(attempts), 3)
         self.assertTrue(main.Plugin._state["ready"])
@@ -1270,8 +1290,8 @@ class StartupSettles(unittest.TestCase):
 
         main._count_gamescope_atoms = counter
         main._pick_display = lambda: ":0"
-        main._panel_is_wide_gamut = lambda: True
-        main._panel_supports_hdr = lambda: True
+        main._panel_is_wide_gamut = lambda *_args: True
+        main._panel_supports_hdr = lambda *_args: True
         main._read_float_atom = lambda name: 1.0
         main._write_float_atom = lambda name, value: True
         main._write_string_atom = lambda name, value: True
@@ -1347,8 +1367,8 @@ class StartupAssertsOff(unittest.TestCase):
             return None
 
         main._pick_display = lambda: ":0"
-        main._panel_is_wide_gamut = lambda: True
-        main._panel_supports_hdr = lambda: True
+        main._panel_is_wide_gamut = lambda *_args: True
+        main._panel_supports_hdr = lambda *_args: True
         main._read_float_atom = lambda name: 1.0
         main._write_float_atom = lambda name, value: True
         main._count_gamescope_atoms = lambda display: 44
@@ -1440,9 +1460,9 @@ class StartupOnExternalDisplay(unittest.TestCase):
         main._write_string_atom = lambda atom, value: (
             calls.append((atom, value)) or True)
         main._display_is_external = lambda: True
-        main._panel_is_wide_gamut = lambda: self.fail(
+        main._panel_is_wide_gamut = lambda *_args: self.fail(
             "external panel must not be measured")
-        main._panel_supports_hdr = lambda: self.fail(
+        main._panel_supports_hdr = lambda *_args: self.fail(
             "external panel must not be measured")
         main.Plugin._apply_sdr = staticmethod(lambda: calls.append("apply SDR"))
         main.Plugin._schedule_sdr_look = lambda self: calls.append("schedule SDR")
@@ -1506,8 +1526,8 @@ class ExternalDisplay(unittest.TestCase):
 
     def _configure(self, external):
         main._display_is_external = lambda: external
-        main._panel_is_wide_gamut = lambda: True
-        main._panel_supports_hdr = lambda: True
+        main._panel_is_wide_gamut = lambda *_args: True
+        main._panel_supports_hdr = lambda *_args: True
         return main.Plugin._configure_for_panel()
 
     def test_an_external_display_is_recognised(self):
@@ -1532,8 +1552,8 @@ class ExternalDisplay(unittest.TestCase):
     def test_stable_panel_reuses_its_cached_classification(self):
         calls = []
         main._display_is_external = lambda: False
-        main._panel_is_wide_gamut = lambda: calls.append("wide") or True
-        main._panel_supports_hdr = lambda: calls.append("hdr") or True
+        main._panel_is_wide_gamut = lambda *_args: calls.append("wide") or True
+        main._panel_supports_hdr = lambda *_args: calls.append("hdr") or True
         main.Plugin._panel_cache_key = None
         main.Plugin._panel_cache_complete = False
         main.Plugin._configure_for_panel()
@@ -1547,8 +1567,8 @@ class ExternalDisplay(unittest.TestCase):
         main.SDR_NEUTRAL_ATOM, main.SDR_ATOM_SPAN = 1.0, 2.0
         probed = []
         main._display_is_external = lambda: True
-        main._panel_is_wide_gamut = lambda: probed.append(1) or False
-        main._panel_supports_hdr = lambda: probed.append(1) or False
+        main._panel_is_wide_gamut = lambda *_args: probed.append(1) or False
+        main._panel_supports_hdr = lambda *_args: probed.append(1) or False
         main.Plugin._configure_for_panel()
         self.assertEqual(probed, [])
         self.assertEqual((main.SDR_NEUTRAL_ATOM, main.SDR_ATOM_SPAN), (1.0, 2.0))

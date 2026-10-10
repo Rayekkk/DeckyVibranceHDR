@@ -14,6 +14,15 @@ import sys
 import types
 
 
+def valid_edid(blob):
+    """Seal a complete synthetic EDID with its header and per-block checksums."""
+    blob = bytearray(blob)
+    blob[:8] = b"\x00\xff\xff\xff\xff\xff\xff\x00"
+    for pos in range(0, len(blob), 128):
+        blob[pos + 127] = (-sum(blob[pos:pos + 127])) & 255
+    return bytes(blob)
+
+
 def install(settings_dir: str | None = None) -> None:
     # lego_updater imports pwd, which only exists on Unix. Stubbing it keeps the
     # logic suite runnable on a Windows dev box without the shared updater having
@@ -58,6 +67,14 @@ def install(settings_dir: str | None = None) -> None:
             def __init__(self, name, settings_directory):
                 self._store = {}
 
+            @property
+            def settings(self):
+                return self._store
+
+            @settings.setter
+            def settings(self, value):
+                self._store = value
+
             def read(self):
                 return self._store
 
@@ -66,6 +83,7 @@ def install(settings_dir: str | None = None) -> None:
 
             def setSetting(self, key, value):
                 self._store[key] = value
+                self.commit()
 
             def commit(self):
                 pass

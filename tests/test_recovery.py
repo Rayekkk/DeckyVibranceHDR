@@ -27,7 +27,9 @@ class Recovery(unittest.IsolatedAsyncioTestCase):
                      hdr_applied_saturation=None, sdr_look_saturation=None)
         for key, value in dict(
             _state=state, _mutation_lock=asyncio.Lock(), _tasks=[],
-            _unloading=False, _sdr_baseline=0.4, _last_sdr_written=None,
+            _unloading=False, _disconnected=False, _session_identity=None, _workers={}, _jobs={}, _due={},
+            _settings_dirty=False, _settings_loaded=True, _other_writer=False, _sdr_baseline=0.4, _last_sdr_written=None,
+            _resume_event=None, _reassert_generation=0,
             _sdr_look_path=None, _hdr_look_path=None,
             _sdr_look_baseline=None, _hdr_look_baseline=None,
             _sdr_generation=0, _sdr_look_generation=0, _hdr_generation=0,
@@ -35,6 +37,8 @@ class Recovery(unittest.IsolatedAsyncioTestCase):
         ).items():
             self.mock(M.Plugin, key, value)
         self.mock(M.Plugin, "_save")
+        self.mock(M, "_lut_writes_disabled", False)
+        self.mock(M, "_xprop_timeout", 3.0)
         self.mock(M, "DEBOUNCE_S", 0)
         self.mock(M, "SDR_COALESCE_S", 0)
         self.mock(M, "SDR_NEUTRAL_ATOM", 1.0)
@@ -49,7 +53,7 @@ class Recovery(unittest.IsolatedAsyncioTestCase):
         self.mock(M.os.path, "isfile", return_value=True)
         self.mock(M.os.path, "exists", return_value=True)
         self.builder = self.mock(M, "_write_look", side_effect=lambda value, slot, *args:
-                                 f"/tmp/{'sdr' if args else 'hdr'}-look-{slot}.cube")
+                                 f"/tmp/{'sdr' if args and args[0] == 'g22' else 'hdr'}-look-{slot}.cube")
 
     def mock(self, obj, key, *args, **kwargs):
         item = patch.object(obj, key, *args, **kwargs)
@@ -167,6 +171,9 @@ class Recovery(unittest.IsolatedAsyncioTestCase):
             await real_sleep(0)
 
         self.mock(M.asyncio, "sleep", side_effect=sleep)
+        real_mono = M.time.monotonic
+        self.mock(M.time, "monotonic", side_effect=lambda: real_mono() + ticks)
+        self.mock(M, "_boottime", side_effect=lambda: real_mono() + ticks)
         with self.assertRaises(asyncio.CancelledError):
             await self.plugin._monitor_loop()
         await self.drain()
@@ -248,6 +255,6 @@ class SdrColorimetry(unittest.TestCase):
         x, y = 303, 314
         blob[0x21], blob[0x22] = x >> 2, y >> 2
         blob[0x1A] = ((x & 3) << 2) | (y & 3)
-        self.assertEqual(M._edid_white_point(blob), (x/1024, y/1024))
+        self.assertEqual(M._edid_white_point(_harness.valid_edid(blob)), (x/1024, y/1024))
         for invalid in (None, b"", bytes(128)):
             self.assertEqual(M._edid_white_point(invalid), V.D65)

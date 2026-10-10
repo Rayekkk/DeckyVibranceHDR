@@ -24,12 +24,17 @@ panel: the display is measured, and an external one is left alone.
 """
 
 import asyncio
+import json
+import math
+import re
 import os
+import shutil
 import struct
 import subprocess
-import sys
 import threading
+import tempfile
 import time
+from collections import OrderedDict
 
 import decky
 from settings import SettingsManager
@@ -55,6 +60,9 @@ updater = Updater(
     log_prefix=LOG,
     plugin_dir=PLUGIN_DIR,
     logger=decky.logger,
+    asset_name=lambda version: f"DeckyVibranceHDR-{version}.zip",
+    archive_root="DeckyVibranceHDR",
+    archive_files=("lego_updater.py", "vibrance_lut.py"),
 )
 
 ATOM_SDR_WIDENESS = "GAMESCOPE_COLOR_SDR_GAMUT_WIDENESS"
@@ -211,7 +219,11 @@ settings = SettingsManager(
 # rely on event-loop ordering once it has been offloaded.
 _settings_lock = threading.RLock()
 _lut_file_lock = threading.RLock()
+# Metadata only: the two HDR and two SDR slots already contain the LUT text.
+_look_file_cache = OrderedDict()
 _lut_writes_disabled = False
+_xprop_timeout = 3.0
+UNLOAD_XPROP_TIMEOUT_S = 0.25
 
 
 def _offload(fn, *args):
@@ -231,10 +243,24 @@ def _boottime() -> float:
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
+        raise ValueError("saturation must be a finite number")
     return min(max(float(v), lo), hi)
 
 
-# ── talking to gamescope ───────────────────────────────────────────────────────
+def _setting(key, default):
+    """Treat each damaged field independently; old numeric ranges still migrate."""
+    try:
+        value = settings.getSetting(key, default)
+        if isinstance(default, bool):
+            return value if isinstance(value, bool) else default
+        return _clamp(value, SDR_MIN if key.startswith("sdr") else HDR_MIN,
+                      SDR_MAX_WIDE if key.startswith("sdr") else HDR_MAX)
+    except (ValueError, TypeError, AttributeError, OverflowError):
+        return default
+
+
+# â”€â”€ talking to gamescope â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 # Steam exports LD_LIBRARY_PATH pointing at its own bundled libraries and the
 # plugin inherits it, so a system binary spawned from here can load Steam's copy
@@ -260,7 +286,8 @@ def _cardinal_to_float(raw):
     if raw is None:
         return None
     try:
-        return struct.unpack("f", struct.pack("I", raw & 0xFFFFFFFF))[0]
+        value = struct.unpack("f", struct.pack("I", raw & 0xFFFFFFFF))[0]
+        return value if math.isfinite(value) else None
     except struct.error:
         return None
 
@@ -270,10 +297,14 @@ def _read_int_atom(name: str):
     try:
         out = subprocess.run(
             ["xprop", "-root", name],
-            capture_output=True, text=True, timeout=3, env=_system_env(),
+            capture_output=True, text=True, timeout=_xprop_timeout, env=_system_env(),
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return None
+    return _parse_int_atom(out)
+
+
+def _parse_int_atom(out):
     if "= " not in out:
         return None
     try:
@@ -297,7 +328,7 @@ def _read_float_atom(name: str):
     try:
         out = subprocess.run(
             ["xprop", "-root", name],
-            capture_output=True, text=True, timeout=3, env=_system_env(),
+            capture_output=True, text=True, timeout=_xprop_timeout, env=_system_env(),
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return None
@@ -314,7 +345,7 @@ def _write_float_atom(name: str, value: float) -> bool:
         subprocess.run(
             ["xprop", "-root", "-f", name, "32c",
              "-set", name, str(_float_to_cardinal(value))],
-            capture_output=True, timeout=3, env=_system_env(), check=True,
+            capture_output=True, timeout=_xprop_timeout, env=_system_env(), check=True,
         )
         return True
     except (OSError, subprocess.SubprocessError):
@@ -326,7 +357,7 @@ def _write_string_atom(name: str, value: str) -> bool:
     try:
         subprocess.run(
             ["xprop", "-root", "-f", name, "8u", "-set", name, value],
-            capture_output=True, timeout=3, env=_system_env(), check=True,
+            capture_output=True, timeout=_xprop_timeout, env=_system_env(), check=True,
         )
         return True
     except (OSError, subprocess.SubprocessError):
@@ -337,15 +368,28 @@ def _read_string_atom(name: str):
     try:
         out = subprocess.run(
             ["xprop", "-root", name],
-            capture_output=True, text=True, timeout=3, env=_system_env(),
+            capture_output=True, text=True, timeout=_xprop_timeout, env=_system_env(),
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return None
+    return _parse_string_atom(out)
+
+
+def _parse_string_atom(out):
     if "= " not in out:
         return None
     value = out.split("= ", 1)[1].strip()
     if value.startswith('"') and value.endswith('"') and len(value) >= 2:
         value = value[1:-1]
+        # xprop quotes backslashes/quotes, newlines/tabs and octal bytes.
+        # Decode only that grammar; unicode_escape would damage UTF-8 paths.
+        raw = re.sub(rb'\\([0-7]{3}|[\\"nt])',
+                     lambda match: (bytes([int(match[1], 8)]) if len(match[1]) == 3
+                                    else {b"n": b"\n", b"t": b"\t"}.get(match[1], match[1])),
+                     value.encode("utf-8"))
+        value = raw.decode("utf-8", errors="surrogateescape")
+    if "\0" in value:
+        return None
     return value or None
 
 
@@ -355,29 +399,51 @@ def _edid_red_primary(blob: bytes):
     Byte 0x19 carries the low two bits of each of the first four coordinates in
     its own pairs of bits; 0x1B and 0x1C carry the high eight of red x and y.
     """
-    if len(blob) < 0x1D:
+    if not _valid_edid(blob):
         return None
     low = blob[0x19]
     red_x = ((blob[0x1B] << 2) | (low >> 6)) / 1024.0
     red_y = ((blob[0x1C] << 2) | ((low >> 4) & 0x03)) / 1024.0
-    return red_x, red_y
+    return (red_x, red_y) if red_x > 0 and red_y > 0 and red_x + red_y <= 1 else None
 
 
-def _read_edid():
+def _read_edid(path=None):
     """The EDID gamescope publishes for the current output, or None."""
-    path = _read_string_atom(ATOM_EDID_PATH)
+    path = path or _read_string_atom(ATOM_EDID_PATH)
     if not path:
         return None
     try:
         with open(path, "rb") as f:
-            return f.read()
+            return f.read(128 * 256 + 1)
     except OSError:
         return None
 
 
+def _file_identity(path):
+    """Detect replacement, edits and deletion at a stable pathname."""
+    if not path:
+        return None
+    try:
+        stat = os.stat(path)
+        return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+    except OSError:
+        return None
+
+
+def _edid_file_identity(path):
+    return _file_identity(path)
+
+
+def _display_session_identity():
+    """The local X socket identifies a session even at the same DISPLAY."""
+    number = DISPLAY.removeprefix(":").split(".", 1)[0]
+    identity = _file_identity(os.path.join(X11_SOCKET_DIR, f"X{number}"))
+    return (DISPLAY, identity) if identity is not None else None
+
+
 def _edid_white_point(blob):
     """Native white used by gamescope's SDR source, with a D65 fallback."""
-    if blob is None or len(blob) < 128:
+    if not _valid_edid(blob):
         return vibrance_lut.D65
     low = blob[0x1A]
     x = ((blob[0x21] << 2) | ((low >> 2) & 3)) / 1024.0
@@ -395,18 +461,32 @@ CTA_HDR_STATIC_METADATA = 0x06
 EOTF_PQ_BIT = 1 << 2
 
 
+def _valid_edid(blob):
+    if not blob or len(blob) < 128 or blob[:8] != b"\x00\xff\xff\xff\xff\xff\xff\x00":
+        return False
+    size = 128 * (1 + blob[126])
+    return len(blob) == size and all(sum(blob[i:i + 128]) % 256 == 0
+                                    for i in range(0, size, 128))
+
+
 def _cta_collection_pq(block: bytes, start: int, end: int):
     """Walk a run of CTA-861 data blocks. None means "not in this one"."""
     pos = start
+    found = None
     while pos < end:
         length = block[pos] & 0x1F
         if length == 0:
             break
-        if (block[pos] >> 5) == CTA_EXTENDED_TAG and length >= 2 \
-                and pos + 2 < end and block[pos + 1] == CTA_HDR_STATIC_METADATA:
-            return bool(block[pos + 2] & EOTF_PQ_BIT)
+        if pos + 1 + length > end:
+            raise ValueError("truncated CTA data block")
+        if (block[pos] >> 5) == CTA_EXTENDED_TAG and block[pos + 1] == CTA_HDR_STATIC_METADATA:
+            if length < 3:
+                raise ValueError("truncated HDR static metadata")
+            if block[pos + 2] & EOTF_PQ_BIT:
+                return True
+            found = False
         pos += 1 + length
-    return None
+    return found
 
 
 def _displayid_pq(block: bytes):
@@ -417,18 +497,25 @@ def _displayid_pq(block: bytes):
     nothing and cannot tell "no HDR" from "no idea".
     """
     payload_length = block[2]
-    pos, end = 5, min(5 + payload_length, 127)
+    pos, end = 5, 5 + payload_length
+    if end > 127:
+        raise ValueError("truncated DisplayID payload")
+    result = None
     while pos + 2 < end:
         tag, body_length = block[pos], block[pos + 2]
         if tag == 0 and body_length == 0:
             break
         body = pos + 3
+        if body + body_length > end:
+            raise ValueError("truncated DisplayID data block")
         if tag == DISPLAYID_CTA_DATA_BLOCK:
             found = _cta_collection_pq(block, body, min(body + body_length, end))
-            if found is not None:
-                return found
+            if found is True:
+                return True
+            if found is False:
+                result = False
         pos = body + body_length
-    return None
+    return result
 
 
 def _edid_supports_pq(blob: bytes):
@@ -444,7 +531,7 @@ def _edid_supports_pq(blob: bytes):
     than the extension count it declares. A complete EDID that never mentions PQ
     is a definite no, because that is the only place it could have been said.
     """
-    if len(blob) < 128:
+    if not _valid_edid(blob):
         return None
     extensions = blob[126]
     if len(blob) < 128 * (1 + extensions):
@@ -452,20 +539,28 @@ def _edid_supports_pq(blob: bytes):
     for index in range(1, extensions + 1):
         block = blob[128 * index:128 * (index + 1)]
         found = None
-        if block[0] == CTA_EXTENSION_TAG:
-            end = block[2]                # where the detailed timings start
-            if 4 <= end <= 127:
+        try:
+            if block[0] == CTA_EXTENSION_TAG:
+                end = block[2] or 127
+                if not 4 <= end <= 127:
+                    return None
                 found = _cta_collection_pq(block, 4, end)
-        elif block[0] == DISPLAYID_EXTENSION_TAG:
-            found = _displayid_pq(block)
-        if found is not None:
-            return found
+            elif block[0] == DISPLAYID_EXTENSION_TAG:
+                found = _displayid_pq(block)
+        except ValueError:
+            return None
+        if found is True:
+            return True
     return False
 
 
-def _panel_supports_hdr():
+_UNREAD_EDID = object()
+
+
+def _panel_supports_hdr(blob=_UNREAD_EDID):
     """Whether the HDR half has anything to act on, or None if unknowable."""
-    blob = _read_edid()
+    if blob is _UNREAD_EDID:
+        blob = _read_edid()
     if blob is None:
         return None
     supported = _edid_supports_pq(blob)
@@ -476,14 +571,15 @@ def _panel_supports_hdr():
     return supported
 
 
-def _panel_is_wide_gamut():
+def _panel_is_wide_gamut(blob=_UNREAD_EDID):
     """gamescope's BIsWideGamut, applied to the EDID gamescope itself publishes.
 
     True, False, or None when the panel could not be identified - in which case
     the caller carries on rather than disabling a working control over a missing
     atom.
     """
-    blob = _read_edid()
+    if blob is _UNREAD_EDID:
+        blob = _read_edid()
     if blob is None:
         return None
     primary = _edid_red_primary(blob)
@@ -497,15 +593,19 @@ def _panel_is_wide_gamut():
     return wide
 
 
-def _count_gamescope_atoms(display: str) -> int:
+def _read_root_properties(display: str):
     try:
-        out = subprocess.run(
+        return subprocess.run(
             ["xprop", "-root"],
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, timeout=_xprop_timeout,
             env=_system_env(DISPLAY=display),
         ).stdout
     except (OSError, subprocess.SubprocessError):
-        return 0
+        return ""
+
+
+def _count_gamescope_atoms(display: str) -> int:
+    out = _read_root_properties(display)
     return sum(1 for line in out.splitlines() if line.startswith("GAMESCOPE"))
 
 
@@ -567,7 +667,7 @@ def _other_writer_present() -> bool:
     return False
 
 
-# ── the HDR look ───────────────────────────────────────────────────────────────
+# â”€â”€ the HDR look â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _runtime_dir() -> str:
     path = (os.environ.get("DECKY_PLUGIN_RUNTIME_DIR")
@@ -595,7 +695,7 @@ def _sdr_split(value: float):
 
 def _write_look(saturation: float, slot: int,
                 encoding: str = "pq", prefix: str = "hdr-look",
-                source_white=vibrance_lut.D65) -> str:
+                source_white=vibrance_lut.D65, cancelled=lambda: False) -> str:
     """Build the .cube and return its path, or "" on failure.
 
     Two slots alternate rather than one file being rewritten. gamescope reloads
@@ -608,19 +708,44 @@ def _write_look(saturation: float, slot: int,
     # A cancelled run_in_executor job keeps running. Serialising here prevents
     # it from sharing the fixed temporary name with its replacement.
     with _lut_file_lock:
-        if _lut_writes_disabled:
+        if _lut_writes_disabled or cancelled():
             return ""
         try:
+            # Include types so invalid True/33.0 cannot hit valid 1.0/33
+            # records and bypass generate()'s input validation.
+            request = (type(saturation), saturation, type(LUT_SIZE), LUT_SIZE,
+                       encoding, tuple(source_white))
+            cached = _look_file_cache.get(path)
+            if (cached is not None and cached[0] == request
+                    and cached[1] == _file_identity(path)):
+                if _lut_writes_disabled or cancelled():
+                    return ""
+                _look_file_cache.move_to_end(path)
+                return path
             text = vibrance_lut.generate(
-                saturation, LUT_SIZE, encoding, source_white)
+                saturation, LUT_SIZE, encoding, source_white, cancelled=cancelled)
+            if _lut_writes_disabled or cancelled():
+                return ""
             with open(tmp, "w") as f:
                 f.write(text)
                 f.flush()
                 os.fsync(f.fileno())
+            if _lut_writes_disabled or cancelled():
+                os.unlink(tmp)
+                return ""
             os.replace(tmp, path)
+            identity = _file_identity(path)
+            if identity is not None:
+                _look_file_cache[path] = (request, identity)
+                _look_file_cache.move_to_end(path)
+                while len(_look_file_cache) > 4:
+                    _look_file_cache.popitem(last=False)
+            else:
+                _look_file_cache.pop(path, None)
             return path
-        except (OSError, ValueError) as e:
-            decky.logger.error(f"{LOG} could not write look: {e}")
+        except (OSError, ValueError, vibrance_lut.BuildCancelled) as e:
+            if not isinstance(e, vibrance_lut.BuildCancelled):
+                decky.logger.error(f"{LOG} could not write look: {e}")
             try:
                 os.unlink(tmp)
             except OSError:
@@ -662,6 +787,7 @@ class Plugin:
         "sdr_error": "",
         "sdr_look_error": "",
         "hdr_error": "",
+        "settings_error": "",
         "generating": False,
         "sdr_generating": False,
         "conflict": "",
@@ -693,8 +819,19 @@ class Plugin:
     _mutation_lock = asyncio.Lock()
     _unloading = False
     _tasks = []
+    _workers = {}
+    _jobs = {}
+    _due = {}
+    _save_generation = 0
+    _settings_dirty = False
+    _settings_loaded = False
+    _other_writer = False
+    _disconnected = False
+    _session_identity = None
+    _reassert_generation = 0
+    _resume_event = None
 
-    # ── exported ───────────────────────────────────────────────────────────────
+    # â”€â”€ exported â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     async def get_state(self) -> dict:
         return dict(Plugin._state)
@@ -718,89 +855,231 @@ class Plugin:
     async def perform_update(self, download_url: str, asset_name: str) -> dict:
         return await _offload(updater.download, download_url, asset_name)
 
-    async def set_sdr_enabled(self, enabled: bool) -> dict:
+    async def set_sdr_enabled(self, enabled: bool, saturation=None) -> dict:
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a boolean")
+        if saturation is not None:
+            saturation = _clamp(saturation, SDR_MIN, Plugin._state["sdr_max"])
         async with Plugin._mutation_lock:
-            enabled = bool(enabled)
+            if Plugin._unloading:
+                return dict(Plugin._state)
+            if saturation is not None:
+                Plugin._state["sdr_saturation"] = saturation
             if enabled and (Plugin._unloading
                             or Plugin._state["external_display"]):
+                if saturation is not None:
+                    self._schedule_save()
                 return dict(Plugin._state)
             if (enabled and not Plugin._state["sdr_enabled"]
-                    and not Plugin._state["sdr_applied"]):
+                    and not Plugin._state["sdr_applied"] and not Plugin._disconnected):
                 Plugin._sdr_baseline = await _offload(
                     _read_float_atom, ATOM_SDR_WIDENESS)
             Plugin._state["sdr_enabled"] = enabled
             if not enabled:
                 Plugin._invalidate_sdr_jobs()
-            await _offload(Plugin._save)
-            if enabled:
+            self._schedule_save()
+            if enabled and not Plugin._disconnected:
                 await _offload(Plugin._apply_sdr)
                 if SDR_LOOK_ENABLED:
                     self._schedule_sdr_look()
-            else:
+            elif not enabled:
                 await _offload(Plugin._release_sdr)
             return dict(Plugin._state)
 
-    async def set_hdr_enabled(self, enabled: bool) -> dict:
+    async def set_hdr_enabled(self, enabled: bool, saturation=None) -> dict:
+        if not isinstance(enabled, bool):
+            raise ValueError("enabled must be a boolean")
+        if saturation is not None:
+            saturation = _clamp(saturation, HDR_MIN, HDR_MAX)
         async with Plugin._mutation_lock:
-            enabled = bool(enabled)
+            if Plugin._unloading:
+                return dict(Plugin._state)
+            if saturation is not None:
+                Plugin._state["hdr_saturation"] = saturation
             if enabled and (Plugin._unloading
                             or Plugin._state["external_display"]
                             or not Plugin._state["hdr_supported"]):
+                if saturation is not None:
+                    self._schedule_save()
                 return dict(Plugin._state)
             Plugin._state["hdr_enabled"] = enabled
             if not enabled:
                 Plugin._invalidate_hdr_jobs()
-            await _offload(Plugin._save)
-            if enabled:
+            self._schedule_save()
+            if enabled and not Plugin._disconnected:
                 self._schedule_hdr()
-            else:
+            elif not enabled:
                 await _offload(Plugin._release_hdr)
             return dict(Plugin._state)
 
     async def set_sdr_saturation(self, value: float) -> dict:
         async with Plugin._mutation_lock:
-            Plugin._state["sdr_saturation"] = _clamp(
-                value, SDR_MIN, Plugin._state["sdr_max"])
-            self._schedule_sdr()
-            if SDR_LOOK_ENABLED:
-                self._schedule_sdr_look()
+            if Plugin._unloading:
+                return dict(Plugin._state)
+            value = _clamp(value, SDR_MIN, Plugin._state["sdr_max"])
+            changed = value != Plugin._state["sdr_saturation"]
+            Plugin._state["sdr_saturation"] = value
+            if changed:
+                self._schedule_save()
+            else:
+                self._retry_settings_save()
+            if changed:
+                self._schedule_sdr()
+                if SDR_LOOK_ENABLED:
+                    self._schedule_sdr_look()
+            else:
+                target, _look = _sdr_split(value)
+                if (Plugin._state["sdr_enabled"] and not Plugin._disconnected
+                        and not Plugin._state["external_display"]
+                        and (Plugin._state["sdr_error"] or not Plugin._state["sdr_applied"]
+                             or Plugin._last_sdr_written != target)):
+                    self._schedule_sdr()
+                self._retry_pending_looks("sdr_look")
             return dict(Plugin._state)
 
     async def set_hdr_saturation(self, value: float) -> dict:
         async with Plugin._mutation_lock:
-            Plugin._state["hdr_saturation"] = _clamp(value, HDR_MIN, HDR_MAX)
-            self._schedule_hdr()
+            if Plugin._unloading:
+                return dict(Plugin._state)
+            value = _clamp(value, HDR_MIN, HDR_MAX)
+            changed = value != Plugin._state["hdr_saturation"]
+            Plugin._state["hdr_saturation"] = value
+            if changed:
+                self._schedule_save()
+            else:
+                self._retry_settings_save()
+            if changed:
+                self._schedule_hdr()
+            else:
+                self._retry_pending_looks("hdr")
             return dict(Plugin._state)
 
     async def reset(self) -> dict:
         async with Plugin._mutation_lock:
+            if Plugin._unloading:
+                return dict(Plugin._state)
             Plugin._state["sdr_saturation"] = SAT_DEFAULT
             Plugin._state["hdr_saturation"] = SAT_DEFAULT
             Plugin._state["sdr_enabled"] = False
             Plugin._state["hdr_enabled"] = False
             Plugin._invalidate_sdr_jobs()
             Plugin._invalidate_hdr_jobs()
-            await _offload(Plugin._save)
+            self._schedule_save()
             await _offload(Plugin._release_sdr)
             await _offload(Plugin._release_hdr)
             return dict(Plugin._state)
 
-    # ── internals ──────────────────────────────────────────────────────────────
+    # â”€â”€ internals â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     @staticmethod
     def _set_error(component: str, message: str = "") -> None:
         """An operation may clear only its own error, never another half's."""
         Plugin._state[f"{component}_error"] = message
         errors = [Plugin._state.get(f"{part}_error", "")
-                  for part in ("sdr", "sdr_look", "hdr")]
-        Plugin._state["reason"] = "; ".join(e for e in errors if e) or "ready"
+                  for part in ("sdr", "sdr_look", "hdr", "settings")]
+        if Plugin._state["ready"]:
+            Plugin._state["reason"] = "; ".join(e for e in errors if e) or "ready"
 
     @staticmethod
-    def _save() -> None:
+    def _save(values=None) -> None:
         with _settings_lock:
-            for key in DEFAULT_SETTINGS:
-                settings.setSetting(key, Plugin._state[key])
-            settings.commit()
+            snapshot = dict(settings.settings) if isinstance(settings.settings, dict) else {}
+            snapshot.update(values if values is not None else
+                            {key: Plugin._state[key] for key in DEFAULT_SETTINGS})
+            path = getattr(settings, "path", None)
+            if path is None:  # In-memory harness; Decky always supplies a path.
+                settings.settings.update(snapshot)
+                settings.commit()
+                return
+            tmp = None
+            try:
+                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                                 dir=os.path.dirname(path),
+                                                 prefix="settings-", delete=False) as f:
+                    tmp = f.name
+                    json.dump(snapshot, f, indent=4, ensure_ascii=False, allow_nan=False)
+                    f.flush()
+                    os.fsync(f.fileno())
+                if os.path.exists(path):
+                    stat = os.stat(path)
+                    os.chmod(tmp, stat.st_mode & 0o777)
+                    if hasattr(os, "geteuid") and os.geteuid() == 0:
+                        os.chown(tmp, stat.st_uid, stat.st_gid)
+                os.replace(tmp, path)
+                settings.settings = snapshot
+            finally:
+                if tmp and os.path.exists(tmp):
+                    os.unlink(tmp)
+
+    @staticmethod
+    def _write_settings(values=None) -> str:
+        """Disk work only; a completed older snapshot cannot acknowledge edits."""
+        try:
+            if values is None:
+                Plugin._save()
+            else:
+                Plugin._save(values)
+            return ""
+        except (OSError, ValueError, TypeError) as exc:
+            decky.logger.error(f"{LOG} settings save failed: {exc}")
+            return f"could not save settings: {exc}"
+
+    @staticmethod
+    def _persist() -> None:
+        # Unload is the synchronous durability barrier. It holds the mutation
+        # lock and accepts no more edits; the writer lock also drains an older
+        # disk snapshot before this final one replaces it.
+        error = Plugin._write_settings()
+        Plugin._settings_dirty = bool(error)
+        Plugin._set_error("settings", error)
+
+    def _schedule_save(self):
+        Plugin._settings_dirty = True
+        Plugin._save_generation += 1
+        token = Plugin._save_generation
+        async def run():
+            await self._debounce("settings")
+            async with Plugin._mutation_lock:
+                if token != Plugin._save_generation or Plugin._unloading:
+                    return
+                values = {key: Plugin._state[key] for key in DEFAULT_SETTINGS}
+            # fsync/replace may be slow. They must not hold the control lock.
+            error = await _offload(Plugin._write_settings, values)
+            async with Plugin._mutation_lock:
+                if token == Plugin._save_generation and not Plugin._unloading:
+                    Plugin._settings_dirty = bool(error)
+                    Plugin._set_error("settings", error)
+        self._queue_worker("settings", token, run, SDR_COALESCE_S)
+
+    def _retry_settings_save(self):
+        worker = Plugin._workers.get("settings")
+        if (Plugin._settings_dirty and not Plugin._unloading
+                and (worker is None or worker.done() or worker not in Plugin._tasks)):
+            self._schedule_save()
+
+    async def _debounce(self, component):
+        while True:
+            remaining = Plugin._due[component] - time.monotonic()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(remaining)
+
+    def _queue_worker(self, component, token, run, delay):
+        """One task and one executor job per component, with one latest request."""
+        Plugin._jobs[component] = (token, run)
+        Plugin._due[component] = time.monotonic() + delay
+        worker = Plugin._workers.get(component)
+        if worker is not None and not worker.done() and worker in Plugin._tasks:
+            return
+        async def loop():
+            while not Plugin._unloading:
+                current, job = Plugin._jobs[component]
+                await job()
+                if Plugin._jobs[component][0] == current:
+                    return
+        task = asyncio.create_task(loop())
+        Plugin._workers[component] = task
+        Plugin._track(task)
 
     @staticmethod
     def _invalidate_sdr_jobs() -> None:
@@ -816,6 +1095,7 @@ class Plugin:
     @staticmethod
     def _apply_sdr() -> None:
         if (Plugin._unloading or not Plugin._state["sdr_enabled"]
+                or Plugin._disconnected
                 or Plugin._state["external_display"]):
             return
         # The slider speaks in "1.0 is neutral"; the atom's neutral moves with
@@ -830,6 +1110,9 @@ class Plugin:
 
     @staticmethod
     def _release_sdr() -> bool:
+        if Plugin._state["sdr_applied"] and not Plugin._can_restore_session():
+            Plugin._set_error("sdr", "waiting for gamescope before restoring SDR")
+            return False
         look_ok = Plugin._release_sdr_look()
         if not Plugin._state["sdr_applied"]:
             Plugin._set_error("sdr")
@@ -864,6 +1147,9 @@ class Plugin:
             Plugin._state["sdr_look_applied"] = False
             Plugin._set_error("sdr_look")
             return True
+        if not Plugin._can_restore_session():
+            Plugin._set_error("sdr_look", "waiting for gamescope before restoring the SDR look")
+            return False
         live = _read_string_atom(ATOM_LOOK_G22)
         if (live and live != owned
                 and _own_look_slot(live, "sdr-look") is None):
@@ -897,6 +1183,9 @@ class Plugin:
             Plugin._state["hdr_applied"] = False
             Plugin._set_error("hdr")
             return True
+        if not Plugin._can_restore_session():
+            Plugin._set_error("hdr", "waiting for gamescope before restoring the HDR look")
+            return False
         live = _read_string_atom(ATOM_LOOK_PQ)
         if (live and live != owned
                 and _own_look_slot(live, "hdr-look") is None):
@@ -919,37 +1208,47 @@ class Plugin:
         return True
 
     @staticmethod
+    def _can_restore_session() -> bool:
+        # Guard restores immediately, including the interval before the next
+        # monitor tick discovers a replaced server. Recovery requires a known
+        # matching identity; ordinary startup without one retains its fallback.
+        if Plugin._session_identity is None:
+            return not Plugin._disconnected
+        return _display_session_identity() == Plugin._session_identity
+
+    @staticmethod
     def _track(task) -> None:
         Plugin._tasks.append(task)
-        task.add_done_callback(lambda t: Plugin._tasks.remove(t)
-                               if t in Plugin._tasks else None)
+        def done(t):
+            if t in Plugin._tasks:
+                Plugin._tasks.remove(t)
+            if not t.cancelled() and t.exception() is not None:
+                decky.logger.error(f"{LOG} background task failed: {t.exception()}")
+        task.add_done_callback(done)
 
     def _schedule_sdr(self) -> None:
         """Write once the slider has been still for SDR_COALESCE_S.
-
-        Also where the settings write happens, so a drag rewrites the file once
-        instead of once per tick.
         """
         Plugin._sdr_generation += 1
         token = Plugin._sdr_generation
 
         async def _run():
             try:
-                await asyncio.sleep(SDR_COALESCE_S)
+                await self._debounce("sdr")
                 async with Plugin._mutation_lock:
                     if (token != Plugin._sdr_generation or Plugin._unloading):
                         return  # superseded by a newer move
-                    await _offload(Plugin._save)
                     if (Plugin._state["sdr_enabled"]
                             and not Plugin._state["external_display"]):
                         await _offload(Plugin._apply_sdr)
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                Plugin._set_error("sdr", f"could not apply SDR: {e}")
+                if token == Plugin._sdr_generation and not Plugin._unloading:
+                    Plugin._set_error("sdr", f"could not apply SDR: {e}")
                 decky.logger.error(f"{LOG} SDR apply failed: {e}")
 
-        Plugin._track(asyncio.create_task(_run()))
+        self._queue_worker("sdr", token, _run, SDR_COALESCE_S)
 
     def _schedule_sdr_look(self) -> None:
         """Same debounce as the HDR half, and for the same reason: a 33-cube
@@ -962,8 +1261,9 @@ class Plugin:
 
         async def _run():
             try:
-                await asyncio.sleep(DEBOUNCE_S)
+                await self._debounce("sdr_look")
                 if (token != Plugin._sdr_look_generation
+                        or Plugin._disconnected
                         or not Plugin._state["sdr_enabled"]
                         or Plugin._state["external_display"]
                         or Plugin._unloading):
@@ -978,10 +1278,25 @@ class Plugin:
                             await _offload(Plugin._release_sdr_look)
                     return
 
-                slot = 1 - Plugin._sdr_look_slot
+                async with Plugin._mutation_lock:
+                    if (token != Plugin._sdr_look_generation or Plugin._unloading
+                            or Plugin._disconnected or not Plugin._state["sdr_enabled"]
+                            or Plugin._state["external_display"]):
+                        return
+                    if Plugin._sdr_look_path is None:
+                        live = await _offload(_read_string_atom, ATOM_LOOK_G22)
+                        live_slot = _own_look_slot(live, "sdr-look")
+                        if live_slot is None:
+                            Plugin._sdr_look_baseline = live
+                        else:
+                            Plugin._sdr_look_path = live
+                            Plugin._sdr_look_slot = live_slot
+                    slot = 1 - Plugin._sdr_look_slot
+                    white_point = Plugin._sdr_white_point
                 path = await _offload(
                     _write_look, look, slot, "g22", "sdr-look",
-                    Plugin._sdr_white_point)
+                    white_point,
+                    lambda: token != Plugin._sdr_look_generation or Plugin._unloading)
                 if not path:
                     if token == Plugin._sdr_look_generation:
                         Plugin._set_error("sdr_look", "could not build the SDR LUT")
@@ -997,15 +1312,10 @@ class Plugin:
                             or Plugin._state["external_display"]
                             or Plugin._unloading):
                         return
-                    if Plugin._sdr_look_path is None:
-                        live = await _offload(
-                            _read_string_atom, ATOM_LOOK_G22)
-                        live_slot = _own_look_slot(live, "sdr-look")
-                        if live_slot is None:
-                            Plugin._sdr_look_baseline = live
-                        else:
-                            Plugin._sdr_look_path = live
-                            Plugin._sdr_look_slot = live_slot
+                    # A foreign writer may have changed while we built, even
+                    # when this replaces an already owned LUT.
+                    live = await _offload(_read_string_atom, ATOM_LOOK_G22)
+                    Plugin._capture_look_baseline("sdr", live)
                     if await _offload(_write_string_atom, ATOM_LOOK_G22, path):
                         Plugin._sdr_look_slot = slot
                         Plugin._sdr_look_path = path
@@ -1021,13 +1331,14 @@ class Plugin:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                Plugin._set_error("sdr_look", f"could not apply the SDR LUT: {e}")
+                if token == Plugin._sdr_look_generation and not Plugin._unloading:
+                    Plugin._set_error("sdr_look", f"could not apply the SDR LUT: {e}")
                 decky.logger.error(f"{LOG} SDR look failed: {e}")
             finally:
                 if token == Plugin._sdr_look_generation:
                     Plugin._state["sdr_generating"] = False
 
-        Plugin._track(asyncio.create_task(_run()))
+        self._queue_worker("sdr_look", token, _run, DEBOUNCE_S)
 
     def _schedule_hdr(self) -> None:
         """Rebuild the LUT once the slider has been still for DEBOUNCE_S."""
@@ -1038,15 +1349,16 @@ class Plugin:
 
         async def _run():
             try:
-                await asyncio.sleep(DEBOUNCE_S)
+                await self._debounce("hdr")
                 async with Plugin._mutation_lock:
                     if (token != Plugin._hdr_generation
+                            or Plugin._disconnected
                             or not Plugin._state["hdr_enabled"]
+                            or not Plugin._state["hdr_supported"]
                             or Plugin._state["external_display"]
                             or Plugin._unloading):
                         return  # superseded by a newer move
                     value = Plugin._state["hdr_saturation"]
-                    await _offload(Plugin._save)
                 if value == SAT_DEFAULT:
                     async with Plugin._mutation_lock:
                         if (token == Plugin._hdr_generation
@@ -1057,17 +1369,10 @@ class Plugin:
                             await _offload(Plugin._release_hdr)
                     return
 
-                slot = 1 - Plugin._look_slot
-                path = await _offload(_write_look, value, slot)
-                if not path:
-                    if token == Plugin._hdr_generation:
-                        Plugin._set_error("hdr", "could not build the HDR LUT")
-                    return
                 async with Plugin._mutation_lock:
-                    if (token != Plugin._hdr_generation
-                            or not Plugin._state["hdr_enabled"]
-                            or Plugin._state["external_display"]
-                            or Plugin._unloading):
+                    if (token != Plugin._hdr_generation or Plugin._unloading
+                            or Plugin._disconnected or not Plugin._state["hdr_enabled"]
+                            or not Plugin._state["hdr_supported"] or Plugin._state["external_display"]):
                         return
                     if Plugin._hdr_look_path is None:
                         live = await _offload(_read_string_atom, ATOM_LOOK_PQ)
@@ -1077,6 +1382,23 @@ class Plugin:
                         else:
                             Plugin._hdr_look_path = live
                             Plugin._look_slot = live_slot
+                    slot = 1 - Plugin._look_slot
+                path = await _offload(_write_look, value, slot, "pq", "hdr-look",
+                                     vibrance_lut.D65,
+                                     lambda: token != Plugin._hdr_generation or Plugin._unloading)
+                if not path:
+                    if token == Plugin._hdr_generation:
+                        Plugin._set_error("hdr", "could not build the HDR LUT")
+                    return
+                async with Plugin._mutation_lock:
+                    if (token != Plugin._hdr_generation
+                            or not Plugin._state["hdr_enabled"]
+                            or not Plugin._state["hdr_supported"]
+                            or Plugin._state["external_display"]
+                            or Plugin._unloading):
+                        return
+                    live = await _offload(_read_string_atom, ATOM_LOOK_PQ)
+                    Plugin._capture_look_baseline("hdr", live)
                     if await _offload(_write_string_atom, ATOM_LOOK_PQ, path):
                         Plugin._look_slot = slot
                         Plugin._hdr_look_path = path
@@ -1092,13 +1414,52 @@ class Plugin:
             except asyncio.CancelledError:
                 raise
             except Exception as e:
-                Plugin._set_error("hdr", f"could not apply the HDR LUT: {e}")
+                if token == Plugin._hdr_generation and not Plugin._unloading:
+                    Plugin._set_error("hdr", f"could not apply the HDR LUT: {e}")
                 decky.logger.error(f"{LOG} HDR apply failed: {e}")
             finally:
                 if token == Plugin._hdr_generation:
                     Plugin._state["generating"] = False
 
-        Plugin._track(asyncio.create_task(_run()))
+        self._queue_worker("hdr", token, _run, DEBOUNCE_S)
+
+    @staticmethod
+    def _capture_look_baseline(component, live) -> None:
+        """Keep a new foreign look before reclaiming an already owned atom.
+
+        A dropped atom is not a new foreign baseline. Our own stale slots must
+        not become restore targets either.
+        """
+        owned = getattr(Plugin, f"_{component}_look_path")
+        if ((owned is None or (live and live != owned))
+                and _own_look_slot(live, f"{component}-look") is None):
+            setattr(Plugin, f"_{component}_look_baseline", live)
+
+    @staticmethod
+    def _reapply_look(component, atom, path, live) -> None:
+        """Report reassert failures without hiding a pending replacement."""
+        Plugin._capture_look_baseline(component, live)
+        if component == "hdr":
+            error_component = "hdr"
+            requested = Plugin._state["hdr_saturation"]
+            applied = Plugin._state["hdr_applied_saturation"]
+        else:
+            error_component = "sdr_look"
+            requested = _sdr_split(Plugin._state["sdr_saturation"])[1]
+            applied = Plugin._state["sdr_look_saturation"]
+        if requested == SAT_DEFAULT:
+            # A failed clear retains ownership for retry, not permission to
+            # revive the old nonneutral look after resume or a dropped atom.
+            if component == "hdr":
+                Plugin._release_hdr()
+            else:
+                Plugin._release_sdr_look()
+            return
+        if not _write_string_atom(atom, path):
+            Plugin._set_error(error_component, f"could not reapply the {component.upper()} LUT to gamescope")
+        elif requested == applied:
+            # A successful old LUT write does not resolve a failed newer build.
+            Plugin._set_error(error_component)
 
     @staticmethod
     def _reassert_looks_if_dropped() -> None:
@@ -1108,29 +1469,32 @@ class Plugin:
         the look internally while the property still names our file, nothing we
         can read says so. The startup and resume ladders are what cover that.
         """
-        for enabled, applied, atom, path in (
-            (Plugin._state["sdr_enabled"],
+        for component, enabled, applied, atom, path in (
+            ("sdr", Plugin._state["sdr_enabled"],
              Plugin._state["sdr_look_applied"], ATOM_LOOK_G22,
              Plugin._sdr_look_path),
-            (Plugin._state["hdr_enabled"],
+            ("hdr", Plugin._state["hdr_enabled"] and Plugin._state["hdr_supported"],
              Plugin._state["hdr_applied"], ATOM_LOOK_PQ,
              Plugin._hdr_look_path),
         ):
             if not enabled or not applied or not path:
                 continue
-            if _read_string_atom(atom) == path or not os.path.exists(path):
+            live = _read_string_atom(atom)
+            neutral = (Plugin._state["hdr_saturation"] if component == "hdr" else
+                       _sdr_split(Plugin._state["sdr_saturation"])[1]) == SAT_DEFAULT
+            if not os.path.exists(path) or (live == path and not neutral):
                 continue
             decky.logger.info(
-                f"{LOG} {os.path.basename(path)} was dropped, writing it back")
-            _write_string_atom(atom, path)
+                f"{LOG} {os.path.basename(path)} needs its look updated")
+            Plugin._reapply_look(component, atom, path, live)
 
-    def _retry_pending_looks(self) -> None:
-        """Called under the mutation lock on a bounded monitor tick.
+    def _retry_pending_looks(self, only=None) -> None:
+        """Retry under the mutation lock on a monitor tick or unchanged edit.
 
         A failed replacement leaves the old file owned, but that file must not
         be mistaken for the requested value. Never supersede an active worker.
         """
-        if Plugin._unloading or Plugin._state["external_display"]:
+        if Plugin._unloading or Plugin._disconnected or Plugin._state["external_display"]:
             return
         for component, enabled, generating, value, applied, path, schedule in (
             ("hdr", Plugin._state["hdr_enabled"] and Plugin._state["hdr_supported"],
@@ -1143,7 +1507,7 @@ class Plugin:
              Plugin._state["sdr_look_saturation"], Plugin._sdr_look_path,
              self._schedule_sdr_look),
         ):
-            if not enabled or generating:
+            if (only is not None and component != only) or not enabled or generating:
                 continue
             pending = (bool(path) if value == SAT_DEFAULT else
                        applied != value or not path or not os.path.isfile(path))
@@ -1151,37 +1515,66 @@ class Plugin:
                 schedule()
 
     @staticmethod
-    def _capture_existing_looks() -> None:
+    def _capture_existing_looks(preserve=False) -> None:
         """Remember foreign baselines and adopt only our own stale paths."""
-        # A path left by a previous process does not tell us its saturation.
-        Plugin._state["sdr_look_saturation"] = None
-        Plugin._state["hdr_applied_saturation"] = None
-        sdr_live = _read_string_atom(ATOM_LOOK_G22)
-        sdr_slot = _own_look_slot(sdr_live, "sdr-look")
-        if sdr_slot is None:
-            Plugin._sdr_look_path = None
-            Plugin._sdr_look_baseline = sdr_live
-            Plugin._state["sdr_look_applied"] = False
-        else:
-            Plugin._sdr_look_slot = sdr_slot
-            Plugin._sdr_look_path = sdr_live
-            Plugin._sdr_look_baseline = None
-            Plugin._state["sdr_look_applied"] = True
-
-        hdr_live = _read_string_atom(ATOM_LOOK_PQ)
-        hdr_slot = _own_look_slot(hdr_live, "hdr-look")
-        if hdr_slot is None:
-            Plugin._hdr_look_path = None
-            Plugin._hdr_look_baseline = hdr_live
-            Plugin._state["hdr_applied"] = False
-        else:
-            Plugin._look_slot = hdr_slot
-            Plugin._hdr_look_path = hdr_live
-            Plugin._hdr_look_baseline = None
-            Plugin._state["hdr_applied"] = True
+        for component, atom, slot_field, applied_field, saturation_field in (
+            ("sdr", ATOM_LOOK_G22, "_sdr_look_slot", "sdr_look_applied", "sdr_look_saturation"),
+            ("hdr", ATOM_LOOK_PQ, "_look_slot", "hdr_applied", "hdr_applied_saturation"),
+        ):
+            path_field, baseline_field = f"_{component}_look_path", f"_{component}_look_baseline"
+            owned = getattr(Plugin, path_field)
+            live = _read_string_atom(atom)
+            slot = _own_look_slot(live, f"{component}-look")
+            if preserve and owned is not None and (not live or slot is not None):
+                # A missing atom on the same server does not erase its foreign
+                # restore value. Resume can republish the retained file.
+                if live and live != owned:
+                    setattr(Plugin, path_field, live)
+                    setattr(Plugin, slot_field, slot)
+                    Plugin._state[saturation_field] = None
+                continue
+            # An adopted stale path in a new session has unknown saturation.
+            Plugin._state[saturation_field] = None
+            setattr(Plugin, baseline_field, live if slot is None else None)
+            setattr(Plugin, path_field, None if slot is None else live)
+            Plugin._state[applied_field] = slot is not None
+            if slot is not None:
+                setattr(Plugin, slot_field, slot)
 
     @staticmethod
-    def _configure_for_panel() -> bool:
+    def _monitor_probe():
+        """Reuse one root dump for session health and panel atoms."""
+        out = _read_root_properties(DISPLAY)
+        count = sum(1 for line in out.splitlines() if line.startswith("GAMESCOPE"))
+        if not count:
+            return 0, None
+        atoms = {}
+        for line in out.splitlines():
+            name = line.partition("(")[0].split("=", 1)[0].strip()
+            if name in (ATOM_IS_EXTERNAL, ATOM_EDID_PATH):
+                atoms[name] = line
+        external = _parse_int_atom(atoms.get(ATOM_IS_EXTERNAL, ""))
+        external_value = None if external is None else bool(external)
+        edid_path = None if external_value is True else _parse_string_atom(atoms.get(ATOM_EDID_PATH, ""))
+        return count, Plugin._probe_panel((external_value, edid_path))
+
+    @staticmethod
+    def _probe_panel(metadata=None):
+        """Read display metadata without mutating settings or owning atoms."""
+        if metadata is None:
+            external_value = _display_is_external()
+            edid_path = None if external_value is True else _read_string_atom(ATOM_EDID_PATH)
+        else:
+            external_value, edid_path = metadata
+        identity = _edid_file_identity(edid_path)
+        cache_key = (("edid", edid_path, identity) if external_value is None else
+                     ("external", bool(external_value), edid_path, identity))
+        cached = cache_key == Plugin._panel_cache_key and Plugin._panel_cache_complete
+        blob = None if external_value is True or cached or not edid_path else _read_edid(edid_path)
+        return external_value, cache_key, blob
+
+    @staticmethod
+    def _configure_for_panel(probe=None) -> bool:
         """Line the slider up with the branch this display takes.
 
         Run at startup and again whenever the display changes underneath us -
@@ -1191,13 +1584,7 @@ class Plugin:
         Returns True when something actually moved.
         """
         global SDR_NEUTRAL_ATOM, SDR_ATOM_SPAN
-        external_value = _display_is_external()
-        if external_value is None:
-            # Older gamescope has no external flag. The EDID path is the next
-            # best stable identity and changes when the output does.
-            cache_key = ("edid", _read_string_atom(ATOM_EDID_PATH))
-        else:
-            cache_key = ("external", bool(external_value))
+        external_value, cache_key, blob = probe if probe is not None else Plugin._probe_panel()
         if (cache_key == Plugin._panel_cache_key
                 and Plugin._panel_cache_complete):
             return False
@@ -1218,8 +1605,8 @@ class Plugin:
                      Plugin._state["hdr_supported"], True, Plugin._sdr_white_point)
             return before != after
 
-        wide = _panel_is_wide_gamut()
-        Plugin._sdr_white_point = _edid_white_point(_read_edid())
+        wide = _panel_is_wide_gamut(blob)
+        Plugin._sdr_white_point = _edid_white_point(blob)
 
         if wide is False:
             SDR_NEUTRAL_ATOM, SDR_ATOM_SPAN = 0.0, 1.0
@@ -1235,7 +1622,7 @@ class Plugin:
             Plugin._state["sdr_max"] = SDR_MAX_WIDE
             Plugin._state["sdr_soft_limit"] = SDR_SOFT_WIDE
 
-        hdr = _panel_supports_hdr()
+        hdr = _panel_supports_hdr(blob)
         Plugin._state["hdr_supported"] = hdr is not False
         Plugin._panel_cache_complete = wide is not None and hdr is not None
         Plugin._state["sdr_saturation"] = _clamp(
@@ -1255,17 +1642,18 @@ class Plugin:
     def _reassert_hdr() -> None:
         """Point gamescope back at the look already sitting on disk."""
         if (Plugin._unloading or Plugin._state["external_display"]
+                or Plugin._disconnected or not Plugin._state["hdr_supported"]
                 or not Plugin._state["hdr_enabled"]
                 or not Plugin._state["hdr_applied"]
                 or not Plugin._hdr_look_path):
             return
         path = Plugin._hdr_look_path
         if os.path.exists(path):
-            _write_string_atom(ATOM_LOOK_PQ, path)
+            Plugin._reapply_look("hdr", ATOM_LOOK_PQ, path, _read_string_atom(ATOM_LOOK_PQ))
 
     @staticmethod
     def _reassert() -> None:
-        if Plugin._unloading or Plugin._state["external_display"]:
+        if Plugin._unloading or Plugin._disconnected or Plugin._state["external_display"]:
             return
         if Plugin._state["sdr_enabled"]:
             Plugin._apply_sdr()
@@ -1273,11 +1661,11 @@ class Plugin:
                     and Plugin._sdr_look_path):
                 path = Plugin._sdr_look_path
                 if os.path.exists(path):
-                    _write_string_atom(ATOM_LOOK_G22, path)
+                    Plugin._reapply_look("sdr", ATOM_LOOK_G22, path, _read_string_atom(ATOM_LOOK_G22))
         Plugin._reassert_hdr()
 
     @staticmethod
-    def _watch_once() -> None:
+    def _watch_once(other_writer=None) -> None:
         """Put our value back when something drops it, and only call it a
         conflict once that keeps happening.
 
@@ -1312,9 +1700,8 @@ class Plugin:
         # this is checked separately and says so in its own words. It costs a
         # process per server, so it goes on the slow tick.
         if slow_tick:
-            slow_conflict = _other_writer_present()
-        else:
-            slow_conflict = bool(Plugin._state["conflict"])
+            Plugin._other_writer = (_other_writer_present() if other_writer is None else other_writer)
+        slow_conflict = Plugin._other_writer
         if slow_conflict:
             Plugin._state["conflict"] = (
                 "another plugin is driving the same SDR setting from a "
@@ -1366,20 +1753,57 @@ class Plugin:
         """
         Plugin._reassert_strikes = 0
         Plugin._state["conflict"] = ""
+        token = Plugin._reassert_generation
         for delay in REASSERT_DELAYS_S:
-            await asyncio.sleep(delay)
+            if Plugin._resume_event is None:
+                await asyncio.sleep(delay)
+            else:
+                try:
+                    await asyncio.wait_for(Plugin._resume_event.wait(), timeout=delay)
+                    Plugin._resume_event.clear()
+                    return  # The same worker restarts with the newest resume.
+                except asyncio.TimeoutError:
+                    pass
             async with Plugin._mutation_lock:
-                if Plugin._unloading:
+                if Plugin._unloading or token != Plugin._reassert_generation:
                     return
                 await _offload(Plugin._reassert)
         Plugin._reassert_strikes = 0
 
-    async def _refresh_panel(self):
+    async def _watch_tick(self):
+        # Reading other X servers is independent of our settings. A stalled
+        # secondary server must not hold the control mutation lock.
+        other_writer = Plugin._other_writer
+        if (Plugin._slow_checks + 1 >= SLOW_CHECK_EVERY
+                and Plugin._state["sdr_enabled"] and Plugin._state["sdr_applied"]):
+            other_writer = await _offload(_other_writer_present)
+        async with Plugin._mutation_lock:
+            if not Plugin._unloading and not Plugin._disconnected:
+                await _offload(Plugin._watch_once, other_writer)
+                self._retry_pending_looks()
+
+    def _schedule_reassert(self, run):
+        Plugin._reassert_generation += 1
+        worker = Plugin._workers.get("reassert")
+        if worker is not None and not worker.done() and worker in Plugin._tasks:
+            Plugin._resume_event.set()
+        else:
+            Plugin._resume_event = asyncio.Event()
+        self._queue_worker("reassert", Plugin._reassert_generation, run, 0)
+
+    async def _refresh_panel(self, probe=None):
         """Follow the display if it changes underneath us."""
+        if Plugin._unloading:
+            return
+        # Metadata reads can each hit a subprocess timeout. Do not delay user
+        # mutations while probing; only the resulting state/atom commit locks.
+        if probe is None:
+            probe = await _offload(Plugin._probe_panel)
         async with Plugin._mutation_lock:
             if Plugin._unloading:
                 return
-            changed = await _offload(Plugin._configure_for_panel)
+            was_external = Plugin._state["external_display"]
+            changed = Plugin._configure_for_panel(probe)
             if Plugin._state["external_display"]:
                 if changed:
                     decky.logger.info(f"{LOG} external display - standing down")
@@ -1391,9 +1815,16 @@ class Plugin:
                 return
             if not changed:
                 return
-            decky.logger.info(f"{LOG} back on the internal panel")
-            # Whatever the external display left in the atom is not our baseline.
-            Plugin._sdr_baseline = None
+            decky.logger.info(f"{LOG} internal panel configuration changed")
+            if was_external:
+                # Capture the internal value before applying our setting again.
+                # If docking failed to release our last write, keep its original
+                # baseline instead of adopting that write as the restore value.
+                live = await _offload(_read_float_atom, ATOM_SDR_WIDENESS)
+                if (not Plugin._state["sdr_applied"] or (live is not None
+                        and (Plugin._last_sdr_written is None
+                             or abs(live - Plugin._last_sdr_written) > 0.001))):
+                    Plugin._sdr_baseline = live
             if Plugin._state["sdr_enabled"]:
                 await _offload(Plugin._apply_sdr)
                 if SDR_LOOK_ENABLED:
@@ -1401,7 +1832,11 @@ class Plugin:
             else:
                 await _offload(Plugin._release_sdr)
             if Plugin._state["hdr_enabled"]:
-                self._schedule_hdr()
+                if Plugin._state["hdr_supported"]:
+                    self._schedule_hdr()
+                else:
+                    Plugin._invalidate_hdr_jobs()
+                    await _offload(Plugin._release_hdr)
             else:
                 await _offload(Plugin._release_hdr)
 
@@ -1414,28 +1849,36 @@ class Plugin:
             try:
                 await asyncio.sleep(SUSPEND_POLL_S)
                 mono, boot = time.monotonic(), _boottime()
+                elapsed = mono - prev_mono
                 asleep = (boot - prev_boot) - (mono - prev_mono)
                 prev_mono, prev_boot = mono, boot
                 if asleep > SUSPEND_SLACK_S:
                     decky.logger.info(
                         f"{LOG} resumed after ~{asleep:.0f}s suspended")
-                    Plugin._track(
-                        asyncio.create_task(self._reassert_repeatedly()))
+                    self._schedule_reassert(self._reassert_repeatedly)
                     since_watch = 0.0
                     continue
-                since_watch += SUSPEND_POLL_S
-                since_panel += SUSPEND_POLL_S
+                since_watch += elapsed
+                since_panel += elapsed
                 if since_panel >= PANEL_CHECK_INTERVAL_S:
                     since_panel = 0.0
-                    await self._refresh_panel()
+                    count, probe = await _offload(Plugin._monitor_probe)
+                    session_identity = await _offload(_display_session_identity)
+                    changed_session = (Plugin._session_identity is not None and session_identity is not None
+                                       and session_identity != Plugin._session_identity)
+                    if not count or changed_session:
+                        async with Plugin._mutation_lock:
+                            Plugin._disconnect()
+                        await self._start_when_ready(start_monitor=False)
+                        continue
+                    await self._refresh_panel(probe)
+                    async with Plugin._mutation_lock:
+                        self._retry_settings_save()
                 if Plugin._state["external_display"]:
                     continue
                 if since_watch >= WATCH_INTERVAL_S:
                     since_watch = 0.0
-                    async with Plugin._mutation_lock:
-                        if not Plugin._unloading:
-                            await _offload(Plugin._watch_once)
-                            self._retry_pending_looks()
+                    await self._watch_tick()
             except asyncio.CancelledError:
                 raise
             except Exception as e:
@@ -1443,29 +1886,48 @@ class Plugin:
                 await asyncio.sleep(2.0)
 
     async def _main(self):
-        global _lut_writes_disabled
+        global _lut_writes_disabled, _xprop_timeout
         decky.logger.info(f"{LOG} startup v{updater.plugin_version()}")
         Plugin._unloading = False
-        with _lut_file_lock:
-            _lut_writes_disabled = False
+        Plugin._settings_loaded = False
+        _xprop_timeout = 3.0
+        await _offload(_wait_for_lut_writer)
+        if Plugin._unloading:
+            return
+        _lut_writes_disabled = False
+        Plugin._workers = {}
+        Plugin._jobs = {}
+        Plugin._due = {}
+        Plugin._tasks = []
+        Plugin._resume_event = None
+        Plugin._disconnected = True
+        Plugin._state["ready"] = False
+        Plugin._state["reason"] = "starting up"
         Plugin._panel_cache_key = None
         Plugin._panel_cache_complete = False
         try:
             await _offload(updater.ssl_context)
         except Exception as e:
             decky.logger.warning(f"{LOG} update checks unavailable: {e}")
+        if Plugin._unloading:
+            return
         try:
             await _offload(settings.read)
         except Exception:
             pass
+        if Plugin._unloading:
+            return
         for key, fallback in DEFAULT_SETTINGS.items():
-            Plugin._state[key] = settings.getSetting(key, fallback)
+            Plugin._state[key] = _setting(key, fallback)
         # Settings written by an older build can sit outside the current range.
         # Widest possible range here; narrowed again once the panel is known.
         Plugin._state["sdr_saturation"] = _clamp(
             Plugin._state["sdr_saturation"], SDR_MIN, SDR_MAX_WIDE)
         Plugin._state["hdr_saturation"] = _clamp(
             Plugin._state["hdr_saturation"], HDR_MIN, HDR_MAX)
+        Plugin._settings_loaded = True
+        # Persist repaired/migrated fields even if no gamescope session arrives.
+        self._schedule_save()
 
         # Decky starts plugins as a system service, so we can easily be up
         # before the session is. Finding nothing here is a race, not a verdict,
@@ -1473,55 +1935,90 @@ class Plugin:
         # somebody reinstalls the plugin.
         Plugin._track(asyncio.create_task(self._start_when_ready()))
 
-    async def _start_when_ready(self):
+    @staticmethod
+    def _disconnect():
+        Plugin._disconnected = True
+        Plugin._state["ready"] = False
+        Plugin._state["reason"] = "gamescope disconnected; looking for a new session"
+        Plugin._invalidate_sdr_jobs()
+        Plugin._invalidate_hdr_jobs()
+        Plugin._panel_cache_key = None
+        Plugin._panel_cache_complete = False
+        Plugin._other_writer = False
+        # A failed read is not proof that the X server restarted. Retain
+        # ownership until startup compares the socket identity.
+
+    @staticmethod
+    def _forget_session_ownership():
+        Plugin._sdr_baseline = None
+        Plugin._last_sdr_written = None
+        Plugin._hdr_look_path = Plugin._sdr_look_path = None
+        Plugin._hdr_look_baseline = Plugin._sdr_look_baseline = None
+        Plugin._state["sdr_look_saturation"] = None
+        Plugin._state["hdr_applied_saturation"] = None
+        for key in ("sdr_applied", "hdr_applied", "sdr_look_applied"):
+            Plugin._state[key] = False
+
+    async def _start_when_ready(self, start_monitor=True):
         delay = GAMESCOPE_RETRY_FIRST_S
         waited = False
-        while not await _offload(_pick_display):
-            if not waited:
-                decky.logger.info(
-                    f"{LOG} no gamescope atoms on any of "
-                    f"{', '.join(DISPLAYS)} yet - waiting")
-                waited = True
-            Plugin._state["reason"] = "waiting for gamescope to come up"
+        while not Plugin._unloading:
+            while not await _offload(_pick_display):
+                if not waited:
+                    decky.logger.info(f"{LOG} no gamescope atoms yet - waiting")
+                    waited = True
+                Plugin._state["reason"] = ("waiting for gamescope to come up" if shutil.which(
+                    "xprop", path=_system_env()["PATH"]) else "xprop is missing; install xorg-xprop")
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, GAMESCOPE_RETRY_MAX_S)
+            previous = -1
+            for _ in range(GAMESCOPE_SETTLE_TRIES):
+                count = await _offload(_count_gamescope_atoms, DISPLAY)
+                if count == 0 or count == previous:
+                    break
+                previous = count
+                await asyncio.sleep(GAMESCOPE_SETTLE_S)
+            if count > 0:
+                break
             await asyncio.sleep(delay)
             delay = min(delay * 2, GAMESCOPE_RETRY_MAX_S)
-        decky.logger.info(f"{LOG} talking to gamescope on {DISPLAY}")
-
-        previous = -1
-        for _ in range(GAMESCOPE_SETTLE_TRIES):
-            count = await _offload(_count_gamescope_atoms, DISPLAY)
-            if count == previous:
-                break
-            previous = count
-            await asyncio.sleep(GAMESCOPE_SETTLE_S)
+        if Plugin._unloading:
+            return
         decky.logger.info(f"{LOG} gamescope settled at {previous} atoms")
 
         async with Plugin._mutation_lock:
             if Plugin._unloading:
                 return
+            session_identity = await _offload(_display_session_identity)
+            preserve = session_identity is not None and session_identity == Plugin._session_identity
+            if not preserve:
+                Plugin._forget_session_ownership()
+            Plugin._session_identity = session_identity
             # Remember what was there before we touch anything, so switching the
             # plugin off puts the display back rather than to our idea of default.
             if Plugin._state["sdr_enabled"]:
-                Plugin._sdr_baseline = None
-                decky.logger.info(f"{LOG} SDR was already on; no baseline to keep")
-            else:
+                if not preserve:
+                    Plugin._sdr_baseline = None
+                    decky.logger.info(f"{LOG} SDR was already on; no baseline to keep")
+            elif not (preserve and Plugin._state["sdr_applied"]):
                 Plugin._sdr_baseline = await _offload(
                     _read_float_atom, ATOM_SDR_WIDENESS)
                 if Plugin._sdr_baseline is not None:
                     decky.logger.info(
                         f"{LOG} SDR baseline {Plugin._sdr_baseline:.3f}")
-            await _offload(Plugin._capture_existing_looks)
+            await _offload(Plugin._capture_existing_looks, preserve)
 
             # Both branches of buildSDRColorimetry are usable; they just start
             # from different places. Do this before exposing the controls.
-            await _offload(Plugin._configure_for_panel)
+            panel_changed = await _offload(Plugin._configure_for_panel)
 
             if (not Plugin._state["hdr_supported"]
                     and Plugin._state["hdr_enabled"]):
                 Plugin._state["hdr_enabled"] = False
                 Plugin._invalidate_hdr_jobs()
-                await _offload(Plugin._save)
+                self._schedule_save()
 
+            Plugin._disconnected = False
             Plugin._state["ready"] = True
             Plugin._state["reason"] = "ready"
 
@@ -1531,21 +2028,31 @@ class Plugin:
                 if Plugin._state["sdr_enabled"]:
                     await _offload(Plugin._apply_sdr)
                     if SDR_LOOK_ENABLED:
-                        self._schedule_sdr_look()
+                        if preserve and not panel_changed:
+                            self._retry_pending_looks("sdr_look")
+                        else:
+                            self._schedule_sdr_look()
                 else:
                     await _offload(Plugin._release_sdr)
                 if Plugin._state["hdr_enabled"]:
-                    self._schedule_hdr()
+                    if preserve:
+                        self._retry_pending_looks("hdr")
+                    else:
+                        self._schedule_hdr()
                 else:
                     await _offload(Plugin._release_hdr)
 
         # Same ladder as after a resume: the session can still be settling.
         if not Plugin._state["external_display"]:
-            Plugin._track(asyncio.create_task(self._reassert_repeatedly()))
-        Plugin._track(asyncio.create_task(self._monitor_loop()))
+            self._schedule_reassert(self._reassert_repeatedly)
+        if start_monitor:
+            Plugin._track(asyncio.create_task(self._monitor_loop()))
 
     async def _unload(self):
-        global _lut_writes_disabled
+        global _lut_writes_disabled, _xprop_timeout
+        # Decky kills a plugin still alive five seconds after SIGTERM. Keep
+        # unavailable X servers from consuming that entire restore window.
+        _xprop_timeout = UNLOAD_XPROP_TIMEOUT_S
         async with Plugin._mutation_lock:
             Plugin._unloading = True
             _lut_writes_disabled = True
@@ -1554,14 +2061,23 @@ class Plugin:
         for task in list(Plugin._tasks):
             task.cancel()
         if Plugin._tasks:
-            await asyncio.wait(list(Plugin._tasks), timeout=1.0)
+            await asyncio.wait(list(Plugin._tasks), timeout=0.1)
         Plugin._tasks = []
         async with Plugin._mutation_lock:
             try:
-                await _offload(Plugin._release_sdr)
-                await _offload(Plugin._release_hdr)
-            except Exception:
-                pass
+                # Different atoms; restore both halves within the stop budget.
+                results = await asyncio.gather(_offload(Plugin._release_sdr),
+                                               _offload(Plugin._release_hdr), return_exceptions=True)
+                for result in results:
+                    if isinstance(result, Exception):
+                        decky.logger.error(f"{LOG} could not restore on unload: {result}")
+            except Exception as exc:
+                decky.logger.error(f"{LOG} could not restore on unload: {exc}")
+            # Flush desired values even when a debounce has not run yet.
+            # Before startup has read the file, the class defaults are not a
+            # snapshot of user settings. A quick unload must leave it intact.
+            if Plugin._settings_loaded or Plugin._settings_dirty:
+                await _offload(Plugin._persist)
         decky.logger.info(f"{LOG} unloaded")
 
     async def _uninstall(self):
