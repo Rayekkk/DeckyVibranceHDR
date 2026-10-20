@@ -112,6 +112,9 @@ class DisplayChoice(unittest.TestCase):
         self.real_display = M.DISPLAY
         self.real_displays = M.DISPLAYS
         self.real_listdir = M.os.listdir
+        # The two XWayland sockets gamescope opens. Without this the tests read
+        # the real /tmp/.X11-unix and fail on any machine with its own X server.
+        M.os.listdir = lambda path: ["X0", "X1"]
 
     def tearDown(self):
         M.subprocess.run = self.real_run
