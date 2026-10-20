@@ -352,16 +352,37 @@ def _cardinal_to_float(raw):
         return None
 
 
-def _read_int_atom(name: str):
-    """A plain CARDINAL, not one of the floats gamescope bit-casts."""
+def _xprop(*args, display=None):
+    """stdout of `xprop -root ...`, or None when xprop could not run or timed out.
+
+    xprop exits 0 with nothing useful when an atom is absent and prints nothing
+    when the server is gone, so "" is an answer. None is not: it says nothing
+    about gamescope, only that this one read did not complete.
+    """
     try:
-        out = _run_xprop(
-            ["xprop", "-root", name],
-            capture_output=True, text=True, timeout=_xprop_timeout, env=_system_env(),
+        return _run_xprop(
+            ["xprop", "-root", *args],
+            capture_output=True, text=True, timeout=_xprop_timeout,
+            env=_system_env() if display is None else _system_env(DISPLAY=display),
         ).stdout
     except (OSError, subprocess.SubprocessError):
         return None
-    return _parse_int_atom(out)
+
+
+def _xprop_set(name: str, fmt: str, value: str) -> bool:
+    try:
+        _run_xprop(
+            ["xprop", "-root", "-f", name, fmt, "-set", name, value],
+            capture_output=True, timeout=_xprop_timeout, env=_system_env(), check=True,
+        )
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _read_int_atom(name: str):
+    """A plain CARDINAL, not one of the floats gamescope bit-casts."""
+    return _parse_int_atom(_xprop(name) or "")
 
 
 def _parse_int_atom(out):
@@ -385,54 +406,21 @@ def _display_is_external():
 
 
 def _read_float_atom(name: str):
-    try:
-        out = _run_xprop(
-            ["xprop", "-root", name],
-            capture_output=True, text=True, timeout=_xprop_timeout, env=_system_env(),
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if "= " not in out:
-        return None
-    try:
-        return _cardinal_to_float(int(out.split("= ", 1)[1].strip()))
-    except ValueError:
-        return None
+    raw = _parse_int_atom(_xprop(name) or "")
+    return None if raw is None else _cardinal_to_float(raw)
 
 
 def _write_float_atom(name: str, value: float) -> bool:
-    try:
-        _run_xprop(
-            ["xprop", "-root", "-f", name, "32c",
-             "-set", name, str(_float_to_cardinal(value))],
-            capture_output=True, timeout=_xprop_timeout, env=_system_env(), check=True,
-        )
-        return True
-    except (OSError, subprocess.SubprocessError):
-        return False
+    return _xprop_set(name, "32c", str(_float_to_cardinal(value)))
 
 
 def _write_string_atom(name: str, value: str) -> bool:
     """UTF8_STRING, matching what gamescope writes for its own path atoms."""
-    try:
-        _run_xprop(
-            ["xprop", "-root", "-f", name, "8u", "-set", name, value],
-            capture_output=True, timeout=_xprop_timeout, env=_system_env(), check=True,
-        )
-        return True
-    except (OSError, subprocess.SubprocessError):
-        return False
+    return _xprop_set(name, "8u", value)
 
 
 def _read_string_atom(name: str):
-    try:
-        out = _run_xprop(
-            ["xprop", "-root", name],
-            capture_output=True, text=True, timeout=_xprop_timeout, env=_system_env(),
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
-    return _parse_string_atom(out)
+    return _parse_string_atom(_xprop(name) or "")
 
 
 def _parse_string_atom(out):
@@ -666,18 +654,11 @@ def _panel_is_wide_gamut(blob=_UNREAD_EDID):
 
 
 def _read_root_properties(display: str):
-    try:
-        return _run_xprop(
-            ["xprop", "-root"],
-            capture_output=True, text=True, timeout=_xprop_timeout,
-            env=_system_env(DISPLAY=display),
-        ).stdout
-    except (OSError, subprocess.SubprocessError):
-        return ""
+    return _xprop(display=display)
 
 
 def _count_gamescope_atoms(display: str) -> int:
-    out = _read_root_properties(display)
+    out = _read_root_properties(display) or ""
     return sum(1 for line in out.splitlines() if line.startswith("GAMESCOPE"))
 
 
@@ -726,15 +707,7 @@ def _other_writer_present() -> bool:
     for candidate in DISPLAYS:
         if candidate == DISPLAY:
             continue
-        try:
-            out = _run_xprop(
-                ["xprop", "-root", ATOM_SDR_WIDENESS],
-                capture_output=True, text=True, timeout=3,
-                env=_system_env(DISPLAY=candidate),
-            ).stdout
-        except (OSError, subprocess.SubprocessError):
-            continue
-        if "= " in out:
+        if "= " in (_xprop(ATOM_SDR_WIDENESS, display=candidate) or ""):
             return True
     return False
 
@@ -1692,8 +1665,14 @@ class Plugin:
 
     @staticmethod
     def _monitor_probe():
-        """Reuse one root dump for session health and panel atoms."""
+        """Reuse one root dump for session health and panel atoms.
+
+        None when the dump did not complete: a slow xprop is no verdict on the
+        session, and treating it as one disconnects a perfectly healthy one.
+        """
         out = _read_root_properties(DISPLAY)
+        if out is None:
+            return None
         count = sum(1 for line in out.splitlines() if line.startswith("GAMESCOPE"))
         if not count:
             return 0, None
@@ -2011,15 +1990,18 @@ class Plugin:
                 since_panel += elapsed
                 if since_panel >= PANEL_CHECK_INTERVAL_S:
                     since_panel = 0.0
-                    count, probe = await _offload(Plugin._monitor_probe)
+                    result = await _offload(Plugin._monitor_probe)
                     session_identity = await _offload(_display_session_identity)
                     changed_session = (Plugin._session_identity is not None and session_identity is not None
                                        and session_identity != Plugin._session_identity)
-                    if not count or changed_session:
+                    count, probe = result if result is not None else (None, None)
+                    if count == 0 or changed_session:
                         async with Plugin._mutation_lock:
                             Plugin._disconnect()
                         await self._start_when_ready(start_monitor=False)
                         continue
+                    if result is None:
+                        continue  # retried on the next panel tick
                     await self._refresh_panel(probe)
                     async with Plugin._mutation_lock:
                         self._retry_settings_save()

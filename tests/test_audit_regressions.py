@@ -175,6 +175,24 @@ class Persistence(unittest.IsolatedAsyncioTestCase):
         # Retain ownership until recovery identifies the old or a new server.
         self.assertEqual(M.Plugin._hdr_look_path, "/tmp/old.cube")
 
+    async def test_timed_out_monitor_probe_is_not_a_disconnect(self):
+        M.Plugin._disconnected = False
+        M.Plugin._state["ready"] = True
+        self.mock(M, "PANEL_CHECK_INTERVAL_S", 0)
+        self.mock(M, "SUSPEND_POLL_S", 0)
+        timeout = subprocess.TimeoutExpired("xprop", M._xprop_timeout)
+        self.mock(M.subprocess, "run", side_effect=[
+            timeout, timeout, SimpleNamespace(stdout="GAMESCOPE_FOCUSED_APP(CARDINAL) = 0")])
+        recovery = self.mock(self.plugin, "_start_when_ready")
+        refresh = self.mock(self.plugin, "_refresh_panel", side_effect=asyncio.CancelledError())
+        with self.assertRaises(asyncio.CancelledError):
+            await self.plugin._monitor_loop()
+        recovery.assert_not_awaited()
+        refresh.assert_awaited_once()
+        self.assertEqual(M.subprocess.run.call_count, 3)
+        self.assertTrue(M.Plugin._state["ready"])
+        self.assertFalse(M.Plugin._disconnected)
+
     async def test_repeated_resume_events_share_one_worker_and_restart_the_ladder(self):
         self.mock(M, "REASSERT_DELAYS_S", (0.02, 0))
         applied = self.mock(M.Plugin, "_reassert")

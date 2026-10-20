@@ -236,7 +236,7 @@ class Latency(unittest.IsolatedAsyncioTestCase):
     async def test_failed_monitor_root_read_does_not_read_an_edid(self):
         self.mock(M.subprocess, "run", side_effect=OSError("X unavailable"))
         read = self.mock(M, "_read_edid")
-        self.assertEqual(M.Plugin._monitor_probe(), (0, None))
+        self.assertIsNone(M.Plugin._monitor_probe())
         read.assert_not_called()
 
     async def check_slot_reuse_through_rpc(self, component, values, atom):
