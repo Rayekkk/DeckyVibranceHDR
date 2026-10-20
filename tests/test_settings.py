@@ -1,26 +1,157 @@
-"""Startup disk-read failures must not replace saved settings with defaults."""
+# SPDX-License-Identifier: BSD-3-Clause
+# Copyright (c) 2026 Rayekkk
+# https://github.com/Rayekkk/DeckyVibranceHDR
+
+"""Reading and writing the settings file."""
+
 import asyncio
 import json
-from pathlib import Path
+import os
+import subprocess
+import sys
 import tempfile
-from types import SimpleNamespace
 import unittest
-import _harness
-_harness.install()
-import main as M
-import test_recovery as R
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
-SAVE = M.Plugin._save
+from _fixtures import PluginCase, SAVE_SETTINGS  # installs the loader stand-ins
+import main as M  # noqa: E402
 
-class ReadFailure(unittest.IsolatedAsyncioTestCase):
-    setUp = R.Recovery.setUp
-    asyncTearDown = R.Recovery.asyncTearDown
-    mock = R.Recovery.mock
-    write_float = R.Recovery.write_float
-    write_string = R.Recovery.write_string
+
+class AtomicSettings(unittest.TestCase):
+    def setUp(self):
+        loaded = patch.object(M.Plugin, "_settings_loaded", True)
+        loaded.start()
+        self.addCleanup(loaded.stop)
+
+    def test_nonroot_save_does_not_require_chown_privileges(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "settings.json")
+            with open(path, "w") as f:
+                f.write("{}")
+            manager = SimpleNamespace(path=path, settings={})
+            with patch.object(M, "settings", manager), patch.object(M.os, "geteuid", return_value=1000, create=True), \
+                    patch.object(M.os, "chown", side_effect=PermissionError("not root"), create=True) as chown:
+                M.Plugin._save()
+                chown.assert_not_called()
+                with open(path) as f:
+                    self.assertIn("hdr_saturation", json.load(f))
+    def test_nonfinite_xproperty_cannot_become_a_saved_baseline(self):
+        for value in (float("nan"), float("inf"), float("-inf")):
+            self.assertIsNone(M._cardinal_to_float(M._float_to_cardinal(value)))
+
+    def test_one_snapshot_preserves_other_keys_and_keeps_old_file_on_failure(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "settings.json")
+            old = {"unrelated": 17, **M.DEFAULT_SETTINGS}
+            with open(path, "w") as f:
+                json.dump(old, f)
+            manager = SimpleNamespace(path=path, settings=old.copy())
+            with patch.object(M, "settings", manager), patch.object(M.Plugin, "_state", {**old, "hdr_saturation": 1.4}):
+                with patch.object(M.os, "replace", side_effect=OSError("full")):
+                    with self.assertRaises(OSError):
+                        M.Plugin._save()
+                with open(path) as f:
+                    self.assertEqual(json.load(f), old)
+                self.assertEqual(manager.settings, old)
+                self.assertEqual(os.listdir(folder), ["settings.json"])
+                M.Plugin._save()
+                with open(path) as f:
+                    self.assertEqual(json.load(f), {**old, "hdr_saturation": 1.4})
+
+    def test_corrupt_settings_fields_use_defaults_independently(self):
+        for bad in (None, "wrong", [], {}, float("nan"), float("inf"), True):
+            with patch.object(M.settings, "getSetting", return_value=bad):
+                self.assertEqual(M._setting("hdr_saturation", 1.0), 1.0)
+        for bad in ("false", 0, 1, None, []):
+            with patch.object(M.settings, "getSetting", return_value=bad):
+                self.assertIs(M._setting("hdr_enabled", False), False)
+
+
+class SettingsFileContract(unittest.TestCase):
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires POSIX named pipes")
+    def test_constructor_cannot_read_fifo_before_startup_validation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            os.mkfifo(Path(directory) / "settings.json")
+            code = "\n".join([
+                "import sys, os, json",
+                "sys.path.insert(0, sys.argv[2])",
+                "import _harness; _harness.install(sys.argv[1])",
+                "import settings",
+                "class EagerManager:",
+                " def __init__(self, name, settings_directory):",
+                "  self.path = os.path.join(settings_directory, name + '.json')",
+                "  self.settings = {}; self.read()",
+                " def read(self):",
+                "  with open(self.path) as source: self.settings = json.load(source)",
+                "settings.SettingsManager = EagerManager",
+                "import main as M",
+                "assert M.settings.settings == {}",
+                "try: M._read_settings()",
+                "except ValueError as e: assert 'regular file' in str(e)",
+                "else: raise AssertionError('FIFO accepted')",
+            ])
+            subprocess.run([sys.executable, "-W", "error", "-c", code,
+                            directory, str(Path(__file__).parent.resolve())],
+                           cwd=Path(M.__file__).parent, check=True,
+                           capture_output=True, timeout=3)
+
+    def test_regular_file_retains_unknown_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            values = {"sdr_enabled": True, "custom": {"label": "zażółć"}}
+            path.write_text(json.dumps(values), encoding="utf-8")
+            store = SimpleNamespace(path=str(path), settings={})
+            with patch.object(M, "settings", store), patch.object(M, "_settings_new", False):
+                M._read_settings()
+            self.assertEqual(store.settings, values)
+            self.assertEqual(json.loads(path.read_text(encoding="utf-8")), values)
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "requires POSIX named pipes")
+    def test_fifo_rejected_promptly_without_fd_leak_or_file_change(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "settings.json"
+            os.mkfifo(path)
+            code = "\n".join([
+                "import os, sys",
+                "sys.path.insert(0, sys.argv[2])",
+                "import _harness; _harness.install()",
+                "import main as M",
+                "from types import SimpleNamespace",
+                "M.settings = SimpleNamespace(path=sys.argv[1], settings={'custom': 'keep'})",
+                "M._settings_new = False",
+                "before = len(os.listdir('/proc/self/fd'))",
+                "for _ in range(100):",
+                " try: M._read_settings()",
+                " except ValueError as e: assert 'regular file' in str(e)",
+                " else: raise AssertionError('FIFO accepted')",
+                "assert len(os.listdir('/proc/self/fd')) == before",
+                "assert M.settings.settings == {'custom': 'keep'}",
+            ])
+            subprocess.run([sys.executable, "-W", "error", "-c", code,
+                            str(path), str(Path(__file__).parent.resolve())],
+                           cwd=Path(M.__file__).parent, check=True,
+                           capture_output=True, timeout=3)
+            self.assertTrue(path.exists())
+
+    @unittest.skipUnless(os.name == "posix", "requires POSIX symlinks")
+    def test_regular_symlink_remains_readable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            real = Path(directory) / "real.json"
+            real.write_text('{"hdr_saturation": 1.4}', encoding="utf-8")
+            link = Path(directory) / "settings.json"
+            link.symlink_to(real)
+            store = SimpleNamespace(path=str(link), settings={})
+            with patch.object(M, "settings", store), patch.object(M, "_settings_new", False):
+                M._read_settings()
+            self.assertEqual(store.settings, {"hdr_saturation": 1.4})
+
+
+class ReadFailure(PluginCase):
 
     async def test_failed_settings_read_then_unload_preserves_existing_file(self):
-        self.mock(M.Plugin, "_save", side_effect=SAVE)
+        self.mock(M.Plugin, "_save", side_effect=SAVE_SETTINGS)
         self.mock(M.updater, "ssl_context", return_value=None)
         self.mock(self.plugin, "_start_when_ready")
         with tempfile.TemporaryDirectory() as directory:
@@ -119,7 +250,7 @@ class ReadFailure(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(M.settings.settings, saved)
 
     async def test_replayed_mutations_during_failed_startup_preserve_unread_file(self):
-        self.mock(M.Plugin, "_save", side_effect=SAVE)
+        self.mock(M.Plugin, "_save", side_effect=SAVE_SETTINGS)
         self.mock(M.updater, "ssl_context", return_value=None)
         self.mock(self.plugin, "_start_when_ready")
         with tempfile.TemporaryDirectory() as folder:
@@ -157,7 +288,7 @@ class ReadFailure(unittest.IsolatedAsyncioTestCase):
         self.mock(M.Plugin, "_settings_dirty", True)
         store = self.mock(M, "settings", SimpleNamespace(settings={}))
         with self.assertRaisesRegex(RuntimeError, "settings"):
-            SAVE({"hdr_saturation": 1.3})
+            SAVE_SETTINGS({"hdr_saturation": 1.3})
         self.plugin._schedule_save()
         M.Plugin._persist()
         self.assertEqual(store.settings, {})
