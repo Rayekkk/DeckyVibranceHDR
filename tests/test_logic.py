@@ -319,7 +319,7 @@ class SerializedMutations(unittest.TestCase):
         real_save = main.Plugin._save
         real_apply = main.Plugin._apply_sdr
         real_release = main.Plugin._release_sdr
-        real_schedule = main.Plugin._schedule_sdr_look
+        real_schedule = main.Plugin._schedule_look
         real_lock = main.Plugin._mutation_lock
         real_read = main._read_float_atom
         saved_state = dict(main.Plugin._state)
@@ -356,7 +356,7 @@ class SerializedMutations(unittest.TestCase):
         main.Plugin._save = staticmethod(fake_save)
         main.Plugin._apply_sdr = staticmethod(fake_apply)
         main.Plugin._release_sdr = staticmethod(fake_release)
-        main.Plugin._schedule_sdr_look = lambda self: None
+        main.Plugin._schedule_look = lambda self, component: None
         main.Plugin._mutation_lock = asyncio.Lock()
         main.Plugin._unloading = False
         main.Plugin._disconnected = False
@@ -372,7 +372,7 @@ class SerializedMutations(unittest.TestCase):
             main.Plugin._save = real_save
             main.Plugin._apply_sdr = real_apply
             main.Plugin._release_sdr = real_release
-            main.Plugin._schedule_sdr_look = real_schedule
+            main.Plugin._schedule_look = real_schedule
             main.Plugin._mutation_lock = real_lock
             main.Plugin._unloading = saved_unloading
             main.Plugin._disconnected = saved_disconnected
@@ -411,7 +411,7 @@ class StaleLookJobs(unittest.TestCase):
 
         async def scenario():
             plugin = main.Plugin()
-            plugin._schedule_hdr()
+            plugin._schedule_look("hdr")
             worker = main.Plugin._tasks[-1]
             while not build_started.is_set():
                 await asyncio.sleep(0.005)
@@ -471,7 +471,7 @@ class StaleLookJobs(unittest.TestCase):
 
         async def scenario():
             plugin = main.Plugin()
-            plugin._schedule_sdr_look()
+            plugin._schedule_look("sdr")
             worker = main.Plugin._tasks[-1]
             await asyncio.gather(worker, return_exceptions=True)
             result["path"] = main.Plugin._sdr_look_path
@@ -1129,7 +1129,7 @@ class LookOwnership(unittest.TestCase):
         main._read_string_atom = lambda atom: own
         main._write_string_atom = lambda atom, value: (
             writes.append((atom, value)) or True)
-        self.assertTrue(main.Plugin._release_hdr())
+        self.assertTrue(main.Plugin._release_look("hdr"))
         self.assertEqual(writes, [(main.ATOM_LOOK_PQ, foreign)])
         self.assertFalse(main.Plugin._state["hdr_applied"])
 
@@ -1140,7 +1140,7 @@ class LookOwnership(unittest.TestCase):
         main.Plugin._state["sdr_look_applied"] = True
         main._read_string_atom = lambda atom: own
         main._write_string_atom = lambda atom, value: False
-        self.assertFalse(main.Plugin._release_sdr_look())
+        self.assertFalse(main.Plugin._release_look("sdr"))
         self.assertEqual(main.Plugin._sdr_look_path, own)
         self.assertTrue(main.Plugin._state["sdr_look_applied"])
 
@@ -1152,15 +1152,15 @@ class ReleaseIsReallyOff(unittest.TestCase):
     def setUp(self):
         self.written = []
         self._write = main._write_float_atom
-        self._release_look = main.Plugin._release_sdr_look
+        self._release_look = main.Plugin.__dict__["_release_look"]
         main._write_float_atom = lambda name, value: (
             self.written.append(value) or True)
-        main.Plugin._release_sdr_look = staticmethod(lambda: None)
+        main.Plugin._release_look = staticmethod(lambda component: None)
         main.Plugin._state.update({"sdr_applied": True, "sdr_enabled": True})
 
     def tearDown(self):
         main._write_float_atom = self._write
-        main.Plugin._release_sdr_look = self._release_look
+        main.Plugin._release_look = self._release_look
         main.Plugin._state.update({"sdr_applied": False, "sdr_enabled": False})
         main.Plugin._sdr_baseline = None
 
@@ -1182,10 +1182,10 @@ class ReleaseIsReallyOff(unittest.TestCase):
         """Both mechanisms are on at once above 200%; releasing one and not the
         other leaves half the saturation behind, which is what shipped."""
         calls = []
-        main.Plugin._release_sdr_look = staticmethod(lambda: calls.append(1))
+        main.Plugin._release_look = staticmethod(lambda component: calls.append(component))
         main.Plugin._state["sdr_applied"] = False
         main.Plugin._release_sdr()
-        self.assertEqual(calls, [1])
+        self.assertEqual(calls, ["sdr"])
 
 
 class BaselineCapture(unittest.TestCase):
@@ -1349,7 +1349,7 @@ class StartupSettles(IsolatedStartup):
         main.Plugin._state["sdr_look_applied"] = True
         main.Plugin._sdr_look_path = path
         try:
-            main.Plugin._release_sdr_look()
+            main.Plugin._release_look("sdr")
         finally:
             main._write_string_atom, main._read_string_atom = real_write, real_read
             main.Plugin._sdr_look_path = None
@@ -1447,8 +1447,7 @@ class StartupOnExternalDisplay(unittest.TestCase):
         real = {name: getattr(main, name) for name in names}
         real_sleep = asyncio.sleep
         real_track = main.Plugin._track
-        real_schedule_sdr = main.Plugin._schedule_sdr_look
-        real_schedule_hdr = main.Plugin._schedule_hdr
+        real_schedule = main.Plugin._schedule_look
         real_apply = main.Plugin._apply_sdr
         real_lock = main.Plugin._mutation_lock
         saved_state = dict(main.Plugin._state)
@@ -1477,8 +1476,8 @@ class StartupOnExternalDisplay(unittest.TestCase):
         main._panel_supports_hdr = lambda *_args: self.fail(
             "external panel must not be measured")
         main.Plugin._apply_sdr = staticmethod(lambda: calls.append("apply SDR"))
-        main.Plugin._schedule_sdr_look = lambda self: calls.append("schedule SDR")
-        main.Plugin._schedule_hdr = lambda self: calls.append("schedule HDR")
+        main.Plugin._schedule_look = lambda self, component: calls.append(
+            f"schedule {component.upper()}")
         main.Plugin._track = staticmethod(lambda task: task.cancel())
         main.Plugin._mutation_lock = asyncio.Lock()
         main.Plugin._panel_cache_key = None
@@ -1497,8 +1496,7 @@ class StartupOnExternalDisplay(unittest.TestCase):
                 setattr(main, name, fn)
             asyncio.sleep = real_sleep
             main.Plugin._track = real_track
-            main.Plugin._schedule_sdr_look = real_schedule_sdr
-            main.Plugin._schedule_hdr = real_schedule_hdr
+            main.Plugin._schedule_look = real_schedule
             main.Plugin._apply_sdr = real_apply
             main.Plugin._mutation_lock = real_lock
             main.Plugin._unloading = saved_unloading

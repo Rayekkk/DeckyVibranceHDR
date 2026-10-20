@@ -103,16 +103,16 @@ class DisplayTransitions(unittest.IsolatedAsyncioTestCase):
 
     async def test_first_lut_build_does_not_replace_a_live_stale_slot(self):
         self.mock(M, "_runtime_dir", return_value="/tmp")
-        for encoding, atom, slot_key, enabled, saturation, schedule in (
-                ("pq", M.ATOM_LOOK_PQ, "_look_slot", "hdr_enabled", "hdr_saturation", self.plugin._schedule_hdr),
-                ("g22", M.ATOM_LOOK_G22, "_sdr_look_slot", "sdr_enabled", "sdr_saturation", self.plugin._schedule_sdr_look)):
+        for encoding, atom, slot_key, enabled, saturation, component in (
+                ("pq", M.ATOM_LOOK_PQ, "_look_slot", "hdr_enabled", "hdr_saturation", "hdr"),
+                ("g22", M.ATOM_LOOK_G22, "_sdr_look_slot", "sdr_enabled", "sdr_saturation", "sdr")):
             M.SDR_NEUTRAL_ATOM, M.SDR_ATOM_SPAN = 0, 1
             prefix = "hdr-look" if encoding == "pq" else "sdr-look"
             self.strings[atom] = f"/tmp/{prefix}-1.cube"
             setattr(M.Plugin, slot_key, 0)
             M.Plugin._state.update({enabled: True, saturation: 1.3 if encoding == "pq" else 2.6})
             self.builder.reset_mock()
-            schedule()
+            self.plugin._schedule_look(component)
             await self.drain()
             self.assertEqual(self.builder.call_args.args[1], 0, encoding)
 
@@ -123,7 +123,7 @@ class DisplayTransitions(unittest.IsolatedAsyncioTestCase):
             return "/tmp/hdr-look-1.cube"
         self.builder.side_effect = build
         M.Plugin._state.update(hdr_enabled=True, hdr_saturation=1.3)
-        self.plugin._schedule_hdr()
+        self.plugin._schedule_look("hdr")
         await self.drain()
         await self.plugin.set_hdr_enabled(False)
         self.assertEqual(self.strings[M.ATOM_LOOK_PQ], "/tmp/foreign-new.cube")

@@ -57,7 +57,7 @@ class Persistence(unittest.IsolatedAsyncioTestCase):
     async def test_unload_restores_before_persistence_and_bounds_xprop_wait(self):
         calls = []
         self.mock(M.Plugin, "_release_sdr", side_effect=lambda: calls.append("sdr"))
-        self.mock(M.Plugin, "_release_hdr", side_effect=lambda: calls.append("hdr"))
+        self.mock(M.Plugin, "_release_look", side_effect=calls.append)
         self.mock(M.Plugin, "_save", side_effect=lambda: calls.append("save"))
         await self.plugin._unload()
         self.assertEqual(set(calls[:2]), {"sdr", "hdr"})
