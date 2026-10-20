@@ -48,6 +48,7 @@ if PLUGIN_DIR not in sys.path:
 # Not `updater`: the loader aliases its own decky_loader.updater to that bare
 # name before we are imported, and sys.modules wins over sys.path.
 from lego_updater import Updater  # noqa: E402
+import vibrance_edid  # noqa: E402
 import vibrance_lut  # noqa: E402
 
 LOG = "[deckyvibrancehdr]"
@@ -64,7 +65,7 @@ updater = Updater(
     logger=decky.logger,
     asset_name=lambda version: f"DeckyVibranceHDR-{version}.zip",
     archive_root="DeckyVibranceHDR",
-    archive_files=("lego_updater.py", "vibrance_lut.py"),
+    archive_files=("lego_updater.py", "vibrance_lut.py", "vibrance_edid.py"),
 )
 
 ATOM_SDR_WIDENESS = "GAMESCOPE_COLOR_SDR_GAMUT_WIDENESS"
@@ -438,20 +439,6 @@ def _parse_string_atom(out):
     return value or None
 
 
-def _edid_red_primary(blob: bytes):
-    """Red x,y from the base EDID chromaticity block, or None.
-
-    Byte 0x19 carries the low two bits of each of the first four coordinates in
-    its own pairs of bits; 0x1B and 0x1C carry the high eight of red x and y.
-    """
-    if not _valid_edid(blob):
-        return None
-    low = blob[0x19]
-    red_x = ((blob[0x1B] << 2) | (low >> 6)) / 1024.0
-    red_y = ((blob[0x1C] << 2) | ((low >> 4) & 0x03)) / 1024.0
-    return (red_x, red_y) if red_x > 0 and red_y > 0 and red_x + red_y <= 1 else None
-
-
 def _read_edid(path=None):
     """Read regular EDID metadata without waiting for a FIFO/device producer."""
     path = path or _read_string_atom(ATOM_EDID_PATH)
@@ -494,120 +481,6 @@ def _display_session_identity():
     return (DISPLAY, identity) if identity is not None else None
 
 
-def _edid_white_point(blob):
-    """Native white used by gamescope's SDR source, with a D65 fallback."""
-    if not _valid_edid(blob):
-        return vibrance_lut.D65
-    low = blob[0x1A]
-    x = ((blob[0x21] << 2) | ((low >> 2) & 3)) / 1024.0
-    y = ((blob[0x22] << 2) | (low & 3)) / 1024.0
-    if x <= 0.0 or y <= 0.0 or x + y >= 1.0:
-        return vibrance_lut.D65
-    return x, y
-
-
-CTA_EXTENSION_TAG = 0x02
-DISPLAYID_EXTENSION_TAG = 0x70
-DISPLAYID_CTA_DATA_BLOCK = 0x81
-CTA_EXTENDED_TAG = 0x07
-CTA_HDR_STATIC_METADATA = 0x06
-EOTF_PQ_BIT = 1 << 2
-
-
-def _valid_edid(blob):
-    if not blob or len(blob) < 128 or blob[:8] != b"\x00\xff\xff\xff\xff\xff\xff\x00":
-        return False
-    size = 128 * (1 + blob[126])
-    return len(blob) == size and all(sum(blob[i:i + 128]) % 256 == 0
-                                    for i in range(0, size, 128))
-
-
-def _cta_collection_pq(block: bytes, start: int, end: int):
-    """Walk a run of CTA-861 data blocks. None means "not in this one"."""
-    pos = start
-    found = None
-    while pos < end:
-        length = block[pos] & 0x1F
-        if length == 0:
-            break
-        if pos + 1 + length > end:
-            raise ValueError("truncated CTA data block")
-        if (block[pos] >> 5) == CTA_EXTENDED_TAG and block[pos + 1] == CTA_HDR_STATIC_METADATA:
-            if length < 3:
-                raise ValueError("truncated HDR static metadata")
-            if block[pos + 2] & EOTF_PQ_BIT:
-                return True
-            found = False
-        pos += 1 + length
-    return found
-
-
-def _displayid_pq(block: bytes):
-    """CTA-861 data blocks can also be carried inside a DisplayID extension.
-
-    The Legion Go S does exactly that - one DisplayID block and no standalone
-    CTA extension at all - so a parser that only looks for tag 0x02 finds
-    nothing and cannot tell "no HDR" from "no idea".
-    """
-    payload_length = block[2]
-    pos, end = 5, 5 + payload_length
-    if end > 127:
-        raise ValueError("truncated DisplayID payload")
-    result = None
-    while pos + 2 < end:
-        tag, body_length = block[pos], block[pos + 2]
-        if tag == 0 and body_length == 0:
-            break
-        body = pos + 3
-        if body + body_length > end:
-            raise ValueError("truncated DisplayID data block")
-        if tag == DISPLAYID_CTA_DATA_BLOCK:
-            found = _cta_collection_pq(block, body, min(body + body_length, end))
-            if found is True:
-                return True
-            if found is False:
-                result = False
-        pos = body + body_length
-    return result
-
-
-def _edid_supports_pq(blob: bytes):
-    """True if the display advertises SMPTE ST 2084 anywhere in its EDID.
-
-    Read from the EDID rather than from GAMESCOPE_HDR_OUTPUT_FEEDBACK on
-    purpose: that atom meant "HDR is on" and now means "HDR is possible"
-    depending on the gamescope build, and reading it the wrong way round is what
-    broke a sibling plugin on Bazzite 44. What the panel claims to support does
-    not move under us.
-
-    None only when the EDID itself cannot be trusted - too short, or shorter
-    than the extension count it declares. A complete EDID that never mentions PQ
-    is a definite no, because that is the only place it could have been said.
-    """
-    if not _valid_edid(blob):
-        return None
-    extensions = blob[126]
-    if len(blob) < 128 * (1 + extensions):
-        return None
-    for index in range(1, extensions + 1):
-        block = blob[128 * index:128 * (index + 1)]
-        found = None
-        try:
-            if block[0] == CTA_EXTENSION_TAG:
-                # CTA-861: d=0 means no timings and no data blocks at all.
-                end = block[2] or 4
-                if not 4 <= end <= 127:
-                    return None
-                found = _cta_collection_pq(block, 4, end)
-            elif block[0] == DISPLAYID_EXTENSION_TAG:
-                found = _displayid_pq(block)
-        except ValueError:
-            return None
-        if found is True:
-            return True
-    return False
-
-
 _UNREAD_EDID = object()
 
 
@@ -617,7 +490,7 @@ def _panel_supports_hdr(blob=_UNREAD_EDID):
         blob = _read_edid()
     if blob is None:
         return None
-    supported = _edid_supports_pq(blob)
+    supported = vibrance_edid.supports_pq(blob)
     if supported is not None:
         decky.logger.info(
             f"{LOG} panel {'advertises' if supported else 'does not advertise'} "
@@ -636,7 +509,7 @@ def _panel_is_wide_gamut(blob=_UNREAD_EDID):
         blob = _read_edid()
     if blob is None:
         return None
-    primary = _edid_red_primary(blob)
+    primary = vibrance_edid.red_primary(blob)
     if primary is None:
         return None
     red_x, red_y = primary
@@ -1601,7 +1474,7 @@ class Plugin:
             return before != after
 
         wide = _panel_is_wide_gamut(blob)
-        Plugin._sdr_white_point = _edid_white_point(blob)
+        Plugin._sdr_white_point = vibrance_edid.white_point(blob)
 
         if wide is False:
             SDR_NEUTRAL_ATOM, SDR_ATOM_SPAN = 0.0, 1.0

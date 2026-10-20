@@ -27,7 +27,7 @@ jobs:
           python-version: "3.13"
 
       - name: Check the backend parses
-        run: python -m compileall -q main.py lego_updater.py vibrance_lut.py
+        run: python -m compileall -q main.py lego_updater.py vibrance_lut.py vibrance_edid.py
 
       - name: Backend tests
         run: python -W error -m unittest discover -s tests -v

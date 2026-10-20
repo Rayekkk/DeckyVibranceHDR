@@ -830,16 +830,16 @@ class PanelDetection(unittest.TestCase):
 
     def test_parses_the_panel_this_was_written_for(self):
         # edid-decode reports 0.6835, 0.3154 for the Legion Go 2 panel.
-        red_x, red_y = main._edid_red_primary(self._edid(0.6836, 0.3154))
+        red_x, red_y = main.vibrance_edid.red_primary(self._edid(0.6836, 0.3154))
         self.assertAlmostEqual(red_x, 0.6836, places=3)
         self.assertAlmostEqual(red_y, 0.3154, places=3)
 
     def test_wide_and_standard_gamut_land_on_opposite_sides(self):
-        wide = main._edid_red_primary(self._edid(0.6836, 0.3154))
+        wide = main.vibrance_edid.red_primary(self._edid(0.6836, 0.3154))
         self.assertTrue(wide[0] > main.WIDE_GAMUT_RED_X
                         and wide[1] < main.WIDE_GAMUT_RED_Y)
         # Rec.709 red, i.e. a plain sRGB panel.
-        plain = main._edid_red_primary(self._edid(0.640, 0.330))
+        plain = main.vibrance_edid.red_primary(self._edid(0.640, 0.330))
         self.assertFalse(plain[0] > main.WIDE_GAMUT_RED_X
                          and plain[1] < main.WIDE_GAMUT_RED_Y)
 
@@ -849,7 +849,7 @@ class PanelDetection(unittest.TestCase):
         self.assertEqual(main.WIDE_GAMUT_RED_Y, 0.320)
 
     def test_a_truncated_edid_is_not_guessed_at(self):
-        self.assertIsNone(main._edid_red_primary(b"\x00" * 16))
+        self.assertIsNone(main.vibrance_edid.red_primary(b"\x00" * 16))
 
 
 class HdrCapability(unittest.TestCase):
@@ -877,28 +877,28 @@ class HdrCapability(unittest.TestCase):
 
     def test_a_panel_advertising_st2084(self):
         # Traditional gamma SDR + SMPTE ST 2084, as the Legion Go 2 reports.
-        self.assertTrue(main._edid_supports_pq(self._edid(0b0000_0101)))
+        self.assertTrue(main.vibrance_edid.supports_pq(self._edid(0b0000_0101)))
 
     def test_a_panel_advertising_only_gamma(self):
-        self.assertFalse(main._edid_supports_pq(self._edid(0b0000_0001)))
+        self.assertFalse(main.vibrance_edid.supports_pq(self._edid(0b0000_0001)))
 
     def test_hlg_alone_is_not_the_transfer_gamescope_drives(self):
-        self.assertFalse(main._edid_supports_pq(self._edid(0b0000_1000)))
+        self.assertFalse(main.vibrance_edid.supports_pq(self._edid(0b0000_1000)))
 
     def test_a_cta_block_with_no_hdr_metadata_is_an_answer(self):
-        self.assertFalse(main._edid_supports_pq(self._edid(None)))
+        self.assertFalse(main.vibrance_edid.supports_pq(self._edid(None)))
 
     def test_dtd_offset_zero_means_no_data_blocks(self):
         """CTA-861 d=0: no data block collection, so bytes after the header -
         here an HDR block left over - must not be read as one."""
         blob = bytearray(self._edid(0b0000_0101))
         blob[128 + 2] = 0
-        self.assertFalse(main._edid_supports_pq(_harness.valid_edid(blob)))
+        self.assertFalse(main.vibrance_edid.supports_pq(_harness.valid_edid(blob)))
 
     def test_a_base_only_edid_is_a_definite_no(self):
         """HDR metadata has nowhere else to live, so a complete EDID without it
         is an answer rather than a shrug."""
-        self.assertFalse(main._edid_supports_pq(self._edid(cta=False)))
+        self.assertFalse(main.vibrance_edid.supports_pq(self._edid(cta=False)))
 
     def test_a_displayid_extension_with_no_hdr_in_it_is_a_no(self):
         """The Legion Go S shape: one DisplayID block, no CTA extension. Read as
@@ -907,7 +907,7 @@ class HdrCapability(unittest.TestCase):
         base[126] = 1
         displayid = bytearray(128)
         displayid[0] = 0x70
-        self.assertFalse(main._edid_supports_pq(_harness.valid_edid(base + displayid)))
+        self.assertFalse(main.vibrance_edid.supports_pq(_harness.valid_edid(base + displayid)))
 
     def test_pq_declared_inside_a_displayid_block_is_found(self):
         """CTA data blocks can be carried inside DisplayID, so looking only for
@@ -921,15 +921,15 @@ class HdrCapability(unittest.TestCase):
         displayid[5] = 0x81                           # CTA-861 data block
         displayid[7] = len(cta_payload)
         displayid[8:8 + len(cta_payload)] = cta_payload
-        self.assertTrue(main._edid_supports_pq(_harness.valid_edid(base + displayid)))
+        self.assertTrue(main.vibrance_edid.supports_pq(_harness.valid_edid(base + displayid)))
 
     def test_a_truncated_edid_is_not_an_answer(self):
-        self.assertIsNone(main._edid_supports_pq(b"\x00" * 64))
+        self.assertIsNone(main.vibrance_edid.supports_pq(b"\x00" * 64))
 
     def test_a_block_promising_more_than_it_holds_does_not_read_past_it(self):
         edid = bytearray(self._edid(0b0000_0101))
         edid[128 + 2] = 127                   # collection runs to the very end
-        self.assertIn(main._edid_supports_pq(_harness.valid_edid(edid)), (True, False))
+        self.assertIn(main.vibrance_edid.supports_pq(_harness.valid_edid(edid)), (True, False))
 
 
 class Environment(unittest.TestCase):

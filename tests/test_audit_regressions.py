@@ -288,29 +288,29 @@ class Edid(unittest.TestCase):
             context.start()
             self.addCleanup(context.stop)
     def test_pq_after_non_pq_metadata_is_found(self):
-        self.assertIs(M._edid_supports_pq(edid_cta(1, 4)), True)
+        self.assertIs(M.vibrance_edid.supports_pq(edid_cta(1, 4)), True)
         blob = bytearray(edid_cta(1))
         blob[126] = 2
         blob.extend(edid_cta(4)[128:])
-        self.assertIs(M._edid_supports_pq(_harness.valid_edid(blob)), True)
+        self.assertIs(M.vibrance_edid.supports_pq(_harness.valid_edid(blob)), True)
 
     def test_invalid_header_checksum_and_truncated_blocks_are_unknown(self):
         valid = edid_cta(4)
         for index in (0, 20, 150, 255):
             broken = bytearray(valid)
             broken[index] ^= 1
-            self.assertIsNone(M._edid_supports_pq(broken))
-        self.assertIsNone(M._edid_red_primary(bytes(29)))
+            self.assertIsNone(M.vibrance_edid.supports_pq(broken))
+        self.assertIsNone(M.vibrance_edid.red_primary(bytes(29)))
         truncated = bytearray(valid)
         truncated[130] = 6
-        self.assertIsNone(M._edid_supports_pq(_harness.valid_edid(truncated)))
+        self.assertIsNone(M.vibrance_edid.supports_pq(_harness.valid_edid(truncated)))
 
     def test_displayid_scans_all_embedded_cta_collections(self):
         base, extension = bytearray(128), bytearray(128)
         base[126] = 1
         extension[0], extension[2] = 0x70, 14
         extension[5:19] = bytes((0x81, 0, 4, 0xe3, 6, 1, 1, 0x81, 0, 4, 0xe3, 6, 4, 1))
-        self.assertIs(M._edid_supports_pq(_harness.valid_edid(base + extension)), True)
+        self.assertIs(M.vibrance_edid.supports_pq(_harness.valid_edid(base + extension)), True)
 
     def test_panel_reads_one_edid_and_invalidates_cache_when_path_changes(self):
         with patch.object(M.Plugin, "_panel_cache_key", None), patch.object(M.Plugin, "_panel_cache_complete", False), \

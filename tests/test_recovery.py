@@ -255,6 +255,6 @@ class SdrColorimetry(unittest.TestCase):
         x, y = 303, 314
         blob[0x21], blob[0x22] = x >> 2, y >> 2
         blob[0x1A] = ((x & 3) << 2) | (y & 3)
-        self.assertEqual(M._edid_white_point(_harness.valid_edid(blob)), (x/1024, y/1024))
+        self.assertEqual(M.vibrance_edid.white_point(_harness.valid_edid(blob)), (x/1024, y/1024))
         for invalid in (None, b"", bytes(128)):
-            self.assertEqual(M._edid_white_point(invalid), V.D65)
+            self.assertEqual(M.vibrance_edid.white_point(invalid), V.D65)

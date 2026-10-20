@@ -32,6 +32,7 @@ const pendingZip = join(buildDir, "release.zip");
 const CONTENTS = [
   "main.py",
   "vibrance_lut.py",
+  "vibrance_edid.py",
   "lego_updater.py",
   "plugin.json",
   "package.json",
