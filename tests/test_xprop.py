@@ -12,25 +12,24 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import _fixtures  # noqa: F401  installs the loader stand-ins
-import main  # noqa: E402
-import main as M  # noqa: E402
+import _fixtures  # noqa: F401  installs the loader stand-ins first
+import main as M
 
 
 class AtomEncoding(unittest.TestCase):
 
     def test_float_round_trip(self):
         for value in (0.0, 0.5, 1.0, 1.3, 1.5):
-            raw = main._float_to_cardinal(value)
-            self.assertAlmostEqual(main._cardinal_to_float(raw), value, places=6)
+            raw = M._float_to_cardinal(value)
+            self.assertAlmostEqual(M._cardinal_to_float(raw), value, places=6)
 
     def test_matches_gamescope_encoding(self):
         # 1.0 as a float is this exact CARDINAL; vibrantDeck writes the same.
-        self.assertEqual(main._float_to_cardinal(1.0), 1065353216)
-        self.assertAlmostEqual(main._cardinal_to_float(1065353216), 1.0, places=6)
+        self.assertEqual(M._float_to_cardinal(1.0), 1065353216)
+        self.assertAlmostEqual(M._cardinal_to_float(1065353216), 1.0, places=6)
 
     def test_none_does_not_raise(self):
-        self.assertIsNone(main._cardinal_to_float(None))
+        self.assertIsNone(M._cardinal_to_float(None))
 
 
 class Environment(unittest.TestCase):
@@ -40,10 +39,10 @@ class Environment(unittest.TestCase):
         os.environ["LD_LIBRARY_PATH"] = "/steam/lib"
         os.environ["LD_PRELOAD"] = "/steam/preload.so"
         try:
-            env = main._system_env()
+            env = M._system_env()
             self.assertNotIn("LD_LIBRARY_PATH", env)
             self.assertNotIn("LD_PRELOAD", env)
-            self.assertEqual(env["DISPLAY"], main.DISPLAY)
+            self.assertEqual(env["DISPLAY"], M.DISPLAY)
             self.assertTrue(env["PATH"])
         finally:
             os.environ.pop("LD_LIBRARY_PATH", None)
@@ -68,29 +67,29 @@ class XpropPaths(unittest.TestCase):
 class CrossServerWriter(unittest.TestCase):
 
     def setUp(self):
-        self.real_run, self.real_display = main.subprocess.run, main.DISPLAY
-        self.real_displays = main.DISPLAYS
-        main.DISPLAY, main.DISPLAYS = ":0", (":0", ":1")
+        self.real_run, self.real_display = M.subprocess.run, M.DISPLAY
+        self.real_displays = M.DISPLAYS
+        M.DISPLAY, M.DISPLAYS = ":0", (":0", ":1")
 
     def tearDown(self):
-        main.subprocess.run, main.DISPLAY = self.real_run, self.real_display
-        main.DISPLAYS = self.real_displays
+        M.subprocess.run, M.DISPLAY = self.real_run, self.real_display
+        M.DISPLAYS = self.real_displays
 
     def _serve(self, by_display):
         class Result:
             def __init__(self, stdout):
                 self.stdout, self.returncode = stdout, 0
 
-        main.subprocess.run = lambda cmd, **kw: Result(
+        M.subprocess.run = lambda cmd, **kw: Result(
             by_display.get(kw["env"]["DISPLAY"], f"{cmd[-1]}:  not found."))
 
     def test_the_server_we_use_is_not_evidence_against_itself(self):
-        self._serve({":0": f"{main.ATOM_SDR_WIDENESS}(CARDINAL) = 1065353216"})
-        self.assertFalse(main._other_writer_present())
+        self._serve({":0": f"{M.ATOM_SDR_WIDENESS}(CARDINAL) = 1065353216"})
+        self.assertFalse(M._other_writer_present())
 
     def test_the_atom_turning_up_elsewhere_is(self):
-        self._serve({":1": f"{main.ATOM_SDR_WIDENESS}(CARDINAL) = 1056964608"})
-        self.assertTrue(main._other_writer_present())
+        self._serve({":1": f"{M.ATOM_SDR_WIDENESS}(CARDINAL) = 1056964608"})
+        self.assertTrue(M._other_writer_present())
 
 
 class DisplayChoice(unittest.TestCase):
@@ -109,34 +108,34 @@ class DisplayChoice(unittest.TestCase):
                            "GAMESCOPE_VROVERLAY_FORWARDING(CARDINAL) = 1"])
 
     def setUp(self):
-        self.real_run = main.subprocess.run
-        self.real_display = main.DISPLAY
-        self.real_displays = main.DISPLAYS
-        self.real_listdir = main.os.listdir
+        self.real_run = M.subprocess.run
+        self.real_display = M.DISPLAY
+        self.real_displays = M.DISPLAYS
+        self.real_listdir = M.os.listdir
 
     def tearDown(self):
-        main.subprocess.run = self.real_run
-        main.DISPLAY = self.real_display
-        main.DISPLAYS = self.real_displays
-        main.os.listdir = self.real_listdir
+        M.subprocess.run = self.real_run
+        M.DISPLAY = self.real_display
+        M.DISPLAYS = self.real_displays
+        M.os.listdir = self.real_listdir
 
     def test_servers_come_from_the_sockets_not_a_guess(self):
-        main.os.listdir = lambda path: ["X2", "X3", "Xnope", ".lock"]
-        self.assertEqual(main._display_candidates(), (":2", ":3"))
+        M.os.listdir = lambda path: ["X2", "X3", "Xnope", ".lock"]
+        self.assertEqual(M._display_candidates(), (":2", ":3"))
 
     def test_an_unreadable_socket_directory_falls_back(self):
         def boom(path):
             raise OSError("no such directory")
 
-        main.os.listdir = boom
-        self.assertEqual(main._display_candidates(), main.DISPLAY_FALLBACK)
+        M.os.listdir = boom
+        self.assertEqual(M._display_candidates(), M.DISPLAY_FALLBACK)
 
     def test_a_desktop_holding_zero_pushes_gamescope_along(self):
         """The numbering is not fixed, so :0 is not necessarily gamescope."""
-        main.os.listdir = lambda path: ["X0", "X1", "X2"]
+        M.os.listdir = lambda path: ["X0", "X1", "X2"]
         self._serve({":0": 'WM_NAME(STRING) = "desktop"',
                      ":1": self.SECONDARY, ":2": self.PRIMARY})
-        self.assertEqual(main._pick_display(), ":2")
+        self.assertEqual(M._pick_display(), ":2")
 
     def _serve(self, by_display):
         class Result:
@@ -146,38 +145,38 @@ class DisplayChoice(unittest.TestCase):
         def fake_run(cmd, **kwargs):
             return Result(by_display.get(kwargs["env"]["DISPLAY"], ""))
 
-        main.subprocess.run = fake_run
+        M.subprocess.run = fake_run
 
     def test_picks_the_server_holding_the_controls(self):
         self._serve({":0": self.SECONDARY, ":1": self.PRIMARY})
-        self.assertEqual(main._pick_display(), ":1")
-        self.assertEqual(main.DISPLAY, ":1")
+        self.assertEqual(M._pick_display(), ":1")
+        self.assertEqual(M.DISPLAY, ":1")
 
     def test_picks_the_other_way_round_just_as_happily(self):
         self._serve({":0": self.PRIMARY, ":1": self.SECONDARY})
-        self.assertEqual(main._pick_display(), ":0")
-        self.assertEqual(main.DISPLAY, ":0")
+        self.assertEqual(M._pick_display(), ":0")
+        self.assertEqual(M.DISPLAY, ":0")
 
     def test_a_thin_server_still_counts_as_gamescope(self):
         """gamescope reads the atom off whichever root the event arrived on, so
         a server carrying only feedback atoms is still a working target - it is
         exactly the one vibrantDeck writes to."""
         self._serve({":0": self.SECONDARY, ":1": self.SECONDARY})
-        self.assertIsNotNone(main._pick_display())
+        self.assertIsNotNone(M._pick_display())
 
     def test_no_gamescope_anywhere(self):
         """The failure this replaces: xprop exits 0 on a plain X server too, so
         checking its status read as ready and every write went nowhere."""
         self._serve({":0": 'WM_NAME(STRING) = "x"'})
-        self.assertIsNone(main._pick_display())
+        self.assertIsNone(M._pick_display())
 
     def test_no_x_server_at_all(self):
         self._serve({})
-        self.assertIsNone(main._pick_display())
+        self.assertIsNone(M._pick_display())
 
     def test_only_gamescope_atoms_are_counted(self):
         self._serve({":0": 'WM_NAME(STRING) = "x"\n_NET_SUPPORTED(ATOM) = 1'})
-        self.assertEqual(main._count_gamescope_atoms(":0"), 0)
+        self.assertEqual(M._count_gamescope_atoms(":0"), 0)
 
 
 class SocketIdentity(unittest.TestCase):

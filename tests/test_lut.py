@@ -14,13 +14,11 @@ import threading
 import unittest
 from collections import OrderedDict
 from pathlib import Path
-from unittest.mock import MagicMock
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-import _fixtures  # noqa: F401  installs the loader stand-ins
-import main  # noqa: E402
-import main as M  # noqa: E402
-import vibrance_lut as V  # noqa: E402
+import _fixtures  # noqa: F401  installs the loader stand-ins first
+import main as M
+import vibrance_lut as V
 
 
 CODE_VALUE_10BIT = 1.0 / 1023.0
@@ -72,7 +70,7 @@ class Saturation(unittest.TestCase):
 
     def test_black_stays_black(self):
         """gamescope's bRaisesBlackLevelFloor keys off the first LUT entry."""
-        for saturation in (0.0, 0.5, 1.0, main.HDR_SOFT_LIMIT, main.HDR_MAX):
+        for saturation in (0.0, 0.5, 1.0, M.HDR_SOFT_LIMIT, M.HDR_MAX):
             self.assertEqual(V.saturate((0.0, 0.0, 0.0), saturation),
                              (0.0, 0.0, 0.0))
 
@@ -102,7 +100,7 @@ class Saturation(unittest.TestCase):
         later keeps the worst selectable case covered instead of quietly
         dropping out of it.
         """
-        for saturation in (0.0, main.HDR_MAX):
+        for saturation in (0.0, M.HDR_MAX):
             for rgb in self._grid(step=3):
                 for channel in V.saturate(rgb, saturation):
                     self.assertGreaterEqual(channel, 0.0)

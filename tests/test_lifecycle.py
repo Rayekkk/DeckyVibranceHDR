@@ -7,6 +7,7 @@
 import asyncio
 import json
 import os
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -14,9 +15,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from _fixtures import PluginCase, SAVE_SETTINGS, drain  # installs the loader stand-ins
-import main  # noqa: E402
-import main as M  # noqa: E402
+from _fixtures import PluginCase, READ_STRING_ATOM, SAVE_SETTINGS, drain, edid_with_red  # installs the loader stand-ins first
+import main as M
 
 
 class Recovery(PluginCase):
@@ -170,80 +170,80 @@ class Reassert(unittest.TestCase):
     def setUp(self):
         self.written = []
         self.live = [2.0]
-        self._read, self._write = main._read_float_atom, main._write_float_atom
-        self._other = main._other_writer_present
+        self._read, self._write = M._read_float_atom, M._write_float_atom
+        self._other = M._other_writer_present
 
         def fake_write(name, value):
             self.written.append(value)
             self.live[0] = value
             return True
 
-        main._read_float_atom = lambda name: self.live[0]
-        main._write_float_atom = fake_write
-        main._other_writer_present = lambda: False
-        self._looks = main.Plugin._reassert_looks_if_dropped
-        main.Plugin._reassert_looks_if_dropped = staticmethod(lambda: None)
-        main.Plugin._slow_checks = 0
-        main.Plugin._other_writer = False
-        main.Plugin._state.update({
+        M._read_float_atom = lambda name: self.live[0]
+        M._write_float_atom = fake_write
+        M._other_writer_present = lambda: False
+        self._looks = M.Plugin._reassert_looks_if_dropped
+        M.Plugin._reassert_looks_if_dropped = staticmethod(lambda: None)
+        M.Plugin._slow_checks = 0
+        M.Plugin._other_writer = False
+        M.Plugin._state.update({
             "sdr_enabled": True, "sdr_applied": True,
             "sdr_saturation": 2.0, "conflict": "",
         })
-        main.Plugin._last_sdr_written = 2.0
-        main.Plugin._reassert_strikes = 0
+        M.Plugin._last_sdr_written = 2.0
+        M.Plugin._reassert_strikes = 0
 
     def tearDown(self):
-        main._read_float_atom, main._write_float_atom = self._read, self._write
-        main._other_writer_present = self._other
-        main.Plugin._reassert_looks_if_dropped = self._looks
-        main.Plugin._slow_checks = 0
-        main.Plugin._state.update({
+        M._read_float_atom, M._write_float_atom = self._read, self._write
+        M._other_writer_present = self._other
+        M.Plugin._reassert_looks_if_dropped = self._looks
+        M.Plugin._slow_checks = 0
+        M.Plugin._state.update({
             "sdr_enabled": False, "sdr_applied": False, "conflict": "",
         })
-        main.Plugin._last_sdr_written = None
-        main.Plugin._reassert_strikes = 0
+        M.Plugin._last_sdr_written = None
+        M.Plugin._reassert_strikes = 0
 
     def test_a_dropped_value_is_put_back_without_crying_conflict(self):
         self.live[0] = 1.0                      # gamescope re-initialised
-        main.Plugin._watch_once()
+        M.Plugin._watch_once()
         self.assertEqual(self.written, [2.0])
-        self.assertEqual(main.Plugin._state["conflict"], "")
+        self.assertEqual(M.Plugin._state["conflict"], "")
 
     def test_something_holding_the_other_end_gets_named(self):
-        for _ in range(main.CONFLICT_STRIKES):  # overwritten after every put-back
+        for _ in range(M.CONFLICT_STRIKES):  # overwritten after every put-back
             self.live[0] = 0.5
-            main.Plugin._watch_once()
-        self.assertIn("vibrantDeck", main.Plugin._state["conflict"])
+            M.Plugin._watch_once()
+        self.assertIn("vibrantDeck", M.Plugin._state["conflict"])
 
     def test_one_strike_short_stays_quiet(self):
-        for _ in range(main.CONFLICT_STRIKES - 1):
+        for _ in range(M.CONFLICT_STRIKES - 1):
             self.live[0] = 0.5
-            main.Plugin._watch_once()
-        self.assertEqual(main.Plugin._state["conflict"], "")
+            M.Plugin._watch_once()
+        self.assertEqual(M.Plugin._state["conflict"], "")
 
     def test_agreement_clears_the_count(self):
         self.live[0] = 1.0
-        main.Plugin._watch_once()
-        self.assertEqual(main.Plugin._reassert_strikes, 1)
-        main.Plugin._watch_once()               # agrees now, we just wrote it
-        self.assertEqual(main.Plugin._reassert_strikes, 0)
-        self.assertEqual(main.Plugin._state["conflict"], "")
+        M.Plugin._watch_once()
+        self.assertEqual(M.Plugin._reassert_strikes, 1)
+        M.Plugin._watch_once()               # agrees now, we just wrote it
+        self.assertEqual(M.Plugin._reassert_strikes, 0)
+        self.assertEqual(M.Plugin._state["conflict"], "")
 
     def test_a_disabled_half_is_left_alone(self):
-        main.Plugin._state["sdr_enabled"] = False
+        M.Plugin._state["sdr_enabled"] = False
         self.live[0] = 0.5
-        main.Plugin._watch_once()
+        M.Plugin._watch_once()
         self.assertEqual(self.written, [])
 
     def test_a_writer_on_another_server_is_named_even_when_we_agree(self):
         """The case our readback cannot see: gamescope applies a write from any
         root, but we only ever read one of them, so the value we read back can
         agree with us while the picture shows somebody else's."""
-        main._other_writer_present = lambda: True
-        main.Plugin._reassert_looks_if_dropped = staticmethod(lambda: None)
-        main.Plugin._slow_checks = main.SLOW_CHECK_EVERY - 1
-        main.Plugin._watch_once()
-        self.assertIn("different X server", main.Plugin._state["conflict"])
+        M._other_writer_present = lambda: True
+        M.Plugin._reassert_looks_if_dropped = staticmethod(lambda: None)
+        M.Plugin._slow_checks = M.SLOW_CHECK_EVERY - 1
+        M.Plugin._watch_once()
+        self.assertIn("different X server", M.Plugin._state["conflict"])
 
 
 class SuspendDetection(unittest.TestCase):
@@ -251,15 +251,15 @@ class SuspendDetection(unittest.TestCase):
     def test_boottime_is_usable_everywhere(self):
         """CLOCK_BOOTTIME is Linux only; the fallback keeps the detector idle
         rather than raising on a dev box."""
-        self.assertIsInstance(main._boottime(), float)
+        self.assertIsInstance(M._boottime(), float)
 
     def test_slack_exceeds_the_poll_interval(self):
         """Otherwise the jitter of an ordinary tick reads as a suspend and the
         values get re-pushed every second forever."""
-        self.assertGreater(main.SUSPEND_SLACK_S, main.SUSPEND_POLL_S)
+        self.assertGreater(M.SUSPEND_SLACK_S, M.SUSPEND_POLL_S)
 
     def test_the_retry_ladder_is_staggered_and_reaches_past_startup(self):
-        delays = main.REASSERT_DELAYS_S
+        delays = M.REASSERT_DELAYS_S
         self.assertEqual(list(delays), sorted(delays))
         self.assertGreater(sum(delays), 10.0)
 
@@ -269,22 +269,22 @@ class IsolatedStartup(unittest.TestCase):
 
     def setUp(self):
         from unittest.mock import patch
-        state = dict(main.Plugin._state)
+        state = dict(M.Plugin._state)
         state.update(sdr_applied=False, sdr_look_applied=False, hdr_applied=False)
-        patches = [(main, "_read_string_atom", lambda _name: None),
-                   (main, "_read_float_atom", lambda _name: 1.0),
-                   (main, "_write_string_atom", lambda *_args: True),
-                   (main, "_write_float_atom", lambda *_args: True),
-                   (main, "_display_is_external", lambda: False),
-                   (main, "_display_session_identity", lambda: None),
-                   (main.Plugin, "_state", state),
-                   (main.Plugin, "_session_identity", None),
-                   (main.Plugin, "_disconnected", False),
-                   (main.Plugin, "_settings_loaded", True),
-                   (main.Plugin, "_sdr_look_path", None),
-                   (main.Plugin, "_hdr_look_path", None),
-                   (main.Plugin, "_sdr_look_baseline", None),
-                   (main.Plugin, "_hdr_look_baseline", None)]
+        patches = [(M, "_read_string_atom", lambda _name: None),
+                   (M, "_read_float_atom", lambda _name: 1.0),
+                   (M, "_write_string_atom", lambda *_args: True),
+                   (M, "_write_float_atom", lambda *_args: True),
+                   (M, "_display_is_external", lambda: False),
+                   (M, "_display_session_identity", lambda: None),
+                   (M.Plugin, "_state", state),
+                   (M.Plugin, "_session_identity", None),
+                   (M.Plugin, "_disconnected", False),
+                   (M.Plugin, "_settings_loaded", True),
+                   (M.Plugin, "_sdr_look_path", None),
+                   (M.Plugin, "_hdr_look_path", None),
+                   (M.Plugin, "_sdr_look_baseline", None),
+                   (M.Plugin, "_hdr_look_baseline", None)]
         for obj, name, value in patches:
             item = patch.object(obj, name, value)
             item.start()
@@ -296,18 +296,18 @@ class StartupRetry(IsolatedStartup):
     the session; giving up permanently meant a reinstall to recover."""
 
     def test_the_backoff_is_bounded_and_starts_quickly(self):
-        self.assertGreater(main.GAMESCOPE_RETRY_FIRST_S, 0.0)
-        self.assertLessEqual(main.GAMESCOPE_RETRY_FIRST_S, 2.0)
-        self.assertGreater(main.GAMESCOPE_RETRY_MAX_S,
-                           main.GAMESCOPE_RETRY_FIRST_S)
-        self.assertLessEqual(main.GAMESCOPE_RETRY_MAX_S, 60.0)
+        self.assertGreater(M.GAMESCOPE_RETRY_FIRST_S, 0.0)
+        self.assertLessEqual(M.GAMESCOPE_RETRY_FIRST_S, 2.0)
+        self.assertGreater(M.GAMESCOPE_RETRY_MAX_S,
+                           M.GAMESCOPE_RETRY_FIRST_S)
+        self.assertLessEqual(M.GAMESCOPE_RETRY_MAX_S, 60.0)
 
     def test_startup_keeps_trying_until_gamescope_turns_up(self):
         attempts = []
-        real_pick, real_sleep = main._pick_display, asyncio.sleep
-        real_wide, real_pq = main._panel_is_wide_gamut, main._panel_supports_hdr
-        real_read = main._read_float_atom
-        saved = (main.SDR_NEUTRAL_ATOM, main.SDR_ATOM_SPAN)
+        real_pick, real_sleep = M._pick_display, asyncio.sleep
+        real_wide, real_pq = M._panel_is_wide_gamut, M._panel_supports_hdr
+        real_read = M._read_float_atom
+        saved = (M.SDR_NEUTRAL_ATOM, M.SDR_ATOM_SPAN)
 
         def flaky():
             attempts.append(1)
@@ -316,24 +316,24 @@ class StartupRetry(IsolatedStartup):
         async def no_wait(_seconds):
             return None
 
-        main._pick_display = flaky
-        main._panel_is_wide_gamut = lambda *_args: True
-        main._panel_supports_hdr = lambda *_args: True
-        main._read_float_atom = lambda name: 1.0
+        M._pick_display = flaky
+        M._panel_is_wide_gamut = lambda *_args: True
+        M._panel_supports_hdr = lambda *_args: True
+        M._read_float_atom = lambda name: 1.0
         from unittest.mock import patch
-        count_patch = patch.object(main, "_count_gamescope_atoms", return_value=44)
+        count_patch = patch.object(M, "_count_gamescope_atoms", return_value=44)
         count_patch.start()
         asyncio.sleep = no_wait
         try:
-            drain(main.Plugin()._start_when_ready())
+            drain(M.Plugin()._start_when_ready())
         finally:
-            main._pick_display, asyncio.sleep = real_pick, real_sleep
-            main._panel_is_wide_gamut, main._panel_supports_hdr = real_wide, real_pq
-            main._read_float_atom = real_read
+            M._pick_display, asyncio.sleep = real_pick, real_sleep
+            M._panel_is_wide_gamut, M._panel_supports_hdr = real_wide, real_pq
+            M._read_float_atom = real_read
             count_patch.stop()
-            main.SDR_NEUTRAL_ATOM, main.SDR_ATOM_SPAN = saved
+            M.SDR_NEUTRAL_ATOM, M.SDR_ATOM_SPAN = saved
         self.assertEqual(len(attempts), 3)
-        self.assertTrue(main.Plugin._state["ready"])
+        self.assertTrue(M.Plugin._state["ready"])
 
 
 class StartupSettles(IsolatedStartup):
@@ -351,41 +351,41 @@ class StartupSettles(IsolatedStartup):
             seen.append(value)
             return value
 
-        real_count, real_sleep = main._count_gamescope_atoms, asyncio.sleep
-        real_pick = main._pick_display
-        real_wide, real_pq = main._panel_is_wide_gamut, main._panel_supports_hdr
-        real_read, real_write = main._read_float_atom, main._write_float_atom
-        real_string = main._write_string_atom
-        saved = (main.SDR_NEUTRAL_ATOM, main.SDR_ATOM_SPAN)
+        real_count, real_sleep = M._count_gamescope_atoms, asyncio.sleep
+        real_pick = M._pick_display
+        real_wide, real_pq = M._panel_is_wide_gamut, M._panel_supports_hdr
+        real_read, real_write = M._read_float_atom, M._write_float_atom
+        real_string = M._write_string_atom
+        saved = (M.SDR_NEUTRAL_ATOM, M.SDR_ATOM_SPAN)
 
         async def no_wait(_seconds):
             return None
 
-        main._count_gamescope_atoms = counter
-        main._pick_display = lambda: ":0"
-        main._panel_is_wide_gamut = lambda *_args: True
-        main._panel_supports_hdr = lambda *_args: True
-        main._read_float_atom = lambda name: 1.0
-        main._write_float_atom = lambda name, value: True
-        main._write_string_atom = lambda name, value: True
+        M._count_gamescope_atoms = counter
+        M._pick_display = lambda: ":0"
+        M._panel_is_wide_gamut = lambda *_args: True
+        M._panel_supports_hdr = lambda *_args: True
+        M._read_float_atom = lambda name: 1.0
+        M._write_float_atom = lambda name, value: True
+        M._write_string_atom = lambda name, value: True
         asyncio.sleep = no_wait
         try:
-            drain(main.Plugin()._start_when_ready())
+            drain(M.Plugin()._start_when_ready())
         finally:
-            main._count_gamescope_atoms, asyncio.sleep = real_count, real_sleep
-            main._pick_display = real_pick
-            main._panel_is_wide_gamut, main._panel_supports_hdr = real_wide, real_pq
-            main._read_float_atom, main._write_float_atom = real_read, real_write
-            main._write_string_atom = real_string
-            main.SDR_NEUTRAL_ATOM, main.SDR_ATOM_SPAN = saved
+            M._count_gamescope_atoms, asyncio.sleep = real_count, real_sleep
+            M._pick_display = real_pick
+            M._panel_is_wide_gamut, M._panel_supports_hdr = real_wide, real_pq
+            M._read_float_atom, M._write_float_atom = real_read, real_write
+            M._write_string_atom = real_string
+            M.SDR_NEUTRAL_ATOM, M.SDR_ATOM_SPAN = saved
         # Stops on the first repeat rather than reading forever.
         self.assertEqual(seen, [20, 30, 44, 44])
 
     def test_the_settle_wait_is_bounded(self):
         """A session that never stops growing must not hold startup for ever."""
-        self.assertGreater(main.GAMESCOPE_SETTLE_TRIES, 2)
+        self.assertGreater(M.GAMESCOPE_SETTLE_TRIES, 2)
         self.assertLessEqual(
-            main.GAMESCOPE_SETTLE_TRIES * main.GAMESCOPE_SETTLE_S, 30.0)
+            M.GAMESCOPE_SETTLE_TRIES * M.GAMESCOPE_SETTLE_S, 30.0)
 
     def test_startup_puts_the_values_back_more_than_once(self):
         """One write into a settling session is not enough; the same ladder the
@@ -402,19 +402,19 @@ class StartupSettles(IsolatedStartup):
         """The look atom outlives a plugin reload, and nothing reloads it into
         our state - so an owned path has to be cleared, not assumed."""
         cleared = []
-        real_write, real_read = main._write_string_atom, main._read_string_atom
-        path = os.path.join(main._runtime_dir(), "sdr-look-0.cube")
-        main._write_string_atom = lambda name, value: (
+        real_write, real_read = M._write_string_atom, M._read_string_atom
+        path = os.path.join(M._runtime_dir(), "sdr-look-0.cube")
+        M._write_string_atom = lambda name, value: (
             cleared.append((name, value)) or True)
-        main._read_string_atom = lambda name: path
-        main.Plugin._state["sdr_look_applied"] = True
-        main.Plugin._sdr_look_path = path
+        M._read_string_atom = lambda name: path
+        M.Plugin._state["sdr_look_applied"] = True
+        M.Plugin._sdr_look_path = path
         try:
-            main.Plugin._release_look("sdr")
+            M.Plugin._release_look("sdr")
         finally:
-            main._write_string_atom, main._read_string_atom = real_write, real_read
-            main.Plugin._sdr_look_path = None
-        self.assertEqual(cleared, [(main.ATOM_LOOK_G22, "")])
+            M._write_string_atom, M._read_string_atom = real_write, real_read
+            M.Plugin._sdr_look_path = None
+        self.assertEqual(cleared, [(M.ATOM_LOOK_G22, "")])
 
 
 class StartupAssertsOff(IsolatedStartup):
@@ -422,72 +422,72 @@ class StartupAssertsOff(IsolatedStartup):
 
     def _boot_with(self, sdr_on, hdr_on, own_looks=True):
         written = []
-        real = {name: getattr(main, name) for name in
+        real = {name: getattr(M, name) for name in
                 ("_pick_display", "_panel_is_wide_gamut", "_panel_supports_hdr",
                  "_read_float_atom", "_write_float_atom", "_write_string_atom",
                  "_read_string_atom", "_count_gamescope_atoms")}
         real_sleep = asyncio.sleep
-        saved_mapping = (main.SDR_NEUTRAL_ATOM, main.SDR_ATOM_SPAN)
-        saved_state = {k: main.Plugin._state[k] for k in
+        saved_mapping = (M.SDR_NEUTRAL_ATOM, M.SDR_ATOM_SPAN)
+        saved_state = {k: M.Plugin._state[k] for k in
                        ("sdr_enabled", "hdr_enabled", "sdr_look_applied",
                         "hdr_applied", "sdr_applied")}
         saved_looks = (
-            main.Plugin._sdr_look_path, main.Plugin._sdr_look_baseline,
-            main.Plugin._hdr_look_path, main.Plugin._hdr_look_baseline,
+            M.Plugin._sdr_look_path, M.Plugin._sdr_look_baseline,
+            M.Plugin._hdr_look_path, M.Plugin._hdr_look_baseline,
         )
 
         async def no_wait(_seconds):
             return None
 
-        main._pick_display = lambda: ":0"
-        main._panel_is_wide_gamut = lambda *_args: True
-        main._panel_supports_hdr = lambda *_args: True
-        main._read_float_atom = lambda name: 1.0
-        main._write_float_atom = lambda name, value: True
-        main._count_gamescope_atoms = lambda display: 44
+        M._pick_display = lambda: ":0"
+        M._panel_is_wide_gamut = lambda *_args: True
+        M._panel_supports_hdr = lambda *_args: True
+        M._read_float_atom = lambda name: 1.0
+        M._write_float_atom = lambda name, value: True
+        M._count_gamescope_atoms = lambda display: 44
         own = {
-            main.ATOM_LOOK_G22: os.path.join(
-                main._runtime_dir(), "sdr-look-0.cube"),
-            main.ATOM_LOOK_PQ: os.path.join(
-                main._runtime_dir(), "hdr-look-0.cube"),
+            M.ATOM_LOOK_G22: os.path.join(
+                M._runtime_dir(), "sdr-look-0.cube"),
+            M.ATOM_LOOK_PQ: os.path.join(
+                M._runtime_dir(), "hdr-look-0.cube"),
         }
         foreign = {
-            main.ATOM_LOOK_G22: "/tmp/foreign-sdr.cube",
-            main.ATOM_LOOK_PQ: "/tmp/foreign-hdr.cube",
+            M.ATOM_LOOK_G22: "/tmp/foreign-sdr.cube",
+            M.ATOM_LOOK_PQ: "/tmp/foreign-hdr.cube",
         }
-        main._read_string_atom = lambda name: (
+        M._read_string_atom = lambda name: (
             own if own_looks else foreign).get(name)
-        main._write_string_atom = lambda name, value: (
+        M._write_string_atom = lambda name, value: (
             written.append((name, value)) or True)
         asyncio.sleep = no_wait
-        main.settings._store.update({"sdr_enabled": sdr_on,
+        M.settings._store.update({"sdr_enabled": sdr_on,
                                      "hdr_enabled": hdr_on})
         try:
-            drain(main.Plugin()._main())
-            drain(main.Plugin()._start_when_ready())
+            drain(M.Plugin()._main())
+            drain(M.Plugin()._start_when_ready())
         finally:
             for name, fn in real.items():
-                setattr(main, name, fn)
+                setattr(M, name, fn)
             asyncio.sleep = real_sleep
-            main.SDR_NEUTRAL_ATOM, main.SDR_ATOM_SPAN = saved_mapping
-            main.Plugin._state.update(saved_state)
-            (main.Plugin._sdr_look_path, main.Plugin._sdr_look_baseline,
-             main.Plugin._hdr_look_path,
-             main.Plugin._hdr_look_baseline) = saved_looks
-            main.settings._store.clear()
+            M.SDR_NEUTRAL_ATOM, M.SDR_ATOM_SPAN = saved_mapping
+            M.Plugin._state.update(saved_state)
+            (M.Plugin._sdr_look_path, M.Plugin._sdr_look_baseline,
+             M.Plugin._hdr_look_path,
+             M.Plugin._hdr_look_baseline) = saved_looks
+            M.settings._store.clear()
         return written
 
     def test_a_disabled_sdr_half_clears_the_g22_look_on_startup(self):
         written = self._boot_with(sdr_on=False, hdr_on=False)
-        self.assertIn((main.ATOM_LOOK_G22, ""), written)
+        self.assertIn((M.ATOM_LOOK_G22, ""), written)
 
     def test_a_disabled_hdr_half_clears_the_pq_look_on_startup(self):
         written = self._boot_with(sdr_on=False, hdr_on=False)
-        self.assertIn((main.ATOM_LOOK_PQ, ""), written)
+        self.assertIn((M.ATOM_LOOK_PQ, ""), written)
 
     def test_an_enabled_half_is_not_cleared_out_from_under_itself(self):
         written = self._boot_with(sdr_on=True, hdr_on=False)
-        self.assertNotIn((main.ATOM_LOOK_G22, ""), written)
+        self.assertNotIn((M.ATOM_LOOK_G22, ""), written)
 
     def test_foreign_looks_are_not_cleared_on_disabled_startup(self):
         written = self._boot_with(
@@ -773,3 +773,165 @@ class StartupShutdown(PluginCase):
 
     async def test_unload_during_settings_read_preserves_unread_settings(self):
         await self.stopped_startup("settings")
+
+
+class MonitorAndResume(PluginCase):
+    """The monitor loop, session rediscovery and the resume ladder."""
+
+    async def test_same_server_conflict_is_not_relabelled_as_another_server(self):
+        M.Plugin._state.update(sdr_enabled=True, sdr_applied=True,
+                              conflict="another plugin keeps overwriting", sdr_saturation=1.4)
+        M.Plugin._last_sdr_written = self.live_sdr = 1.4
+        M.Plugin._watch_once()
+        self.assertEqual(M.Plugin._state["conflict"], "")
+
+    async def test_unsupported_panel_releases_hdr_and_cancels_work(self):
+        M.Plugin._state.update(hdr_enabled=True)
+        M.Plugin._hdr_look_path = "/tmp/hdr-look-0.cube"
+        M.Plugin._state["hdr_applied"] = True
+        self.mock(M.Plugin, "_configure_for_panel", side_effect=lambda *args:
+                  M.Plugin._state.update(hdr_supported=False) or True)
+        await self.plugin._refresh_panel()
+        self.assertIsNone(M.Plugin._hdr_look_path)
+        self.builder.assert_not_called()
+
+    async def test_disconnected_session_is_rediscovered_without_another_monitor(self):
+        M.Plugin._disconnect()
+        M.Plugin._state.update(sdr_enabled=True, sdr_saturation=1.4)
+        self.mock(M, "_pick_display", return_value=":2")
+        self.mock(M, "_count_gamescope_atoms", return_value=44)
+        self.mock(M, "GAMESCOPE_SETTLE_S", 0)
+        self.mock(M.Plugin, "_configure_for_panel", return_value=False)
+        self.mock(M.Plugin, "_capture_existing_looks")
+        self.mock(self.plugin, "_reassert_repeatedly", return_value=None)
+        await self.plugin._start_when_ready(start_monitor=False)
+        self.assertTrue(M.Plugin._state["ready"])
+        self.assertFalse(M.Plugin._disconnected)
+        self.assertAlmostEqual(self.live_sdr, 1.4)
+        await self.drain()
+
+    async def test_monitor_detects_hdr_only_disconnect_and_invokes_recovery(self):
+        M.Plugin._state.update(sdr_enabled=False, hdr_enabled=True, hdr_applied=True)
+        M.Plugin._hdr_look_path = "/tmp/old.cube"
+        self.mock(M, "PANEL_CHECK_INTERVAL_S", 0)
+        self.mock(M.Plugin, "_monitor_probe", return_value=(0, None))
+        recovery = self.mock(self.plugin, "_start_when_ready", side_effect=asyncio.CancelledError())
+        self.mock(M, "SUSPEND_POLL_S", 0)
+        with self.assertRaises(asyncio.CancelledError):
+            await self.plugin._monitor_loop()
+        recovery.assert_awaited_once_with(start_monitor=False)
+        self.assertFalse(M.Plugin._state["ready"])
+        # Retain ownership until recovery identifies the old or a new server.
+        self.assertEqual(M.Plugin._hdr_look_path, "/tmp/old.cube")
+
+    async def test_timed_out_monitor_probe_is_not_a_disconnect(self):
+        M.Plugin._disconnected = False
+        M.Plugin._state["ready"] = True
+        self.mock(M, "PANEL_CHECK_INTERVAL_S", 0)
+        self.mock(M, "SUSPEND_POLL_S", 0)
+        timeout = subprocess.TimeoutExpired("xprop", M._xprop_timeout)
+        self.mock(M.subprocess, "run", side_effect=[
+            timeout, timeout, SimpleNamespace(stdout="GAMESCOPE_FOCUSED_APP(CARDINAL) = 0")])
+        recovery = self.mock(self.plugin, "_start_when_ready")
+        refresh = self.mock(self.plugin, "_refresh_panel", side_effect=asyncio.CancelledError())
+        with self.assertRaises(asyncio.CancelledError):
+            await self.plugin._monitor_loop()
+        recovery.assert_not_awaited()
+        refresh.assert_awaited_once()
+        self.assertEqual(M.subprocess.run.call_count, 3)
+        self.assertTrue(M.Plugin._state["ready"])
+        self.assertFalse(M.Plugin._disconnected)
+
+    async def test_repeated_resume_events_share_one_worker_and_restart_the_ladder(self):
+        self.mock(M, "REASSERT_DELAYS_S", (0.02, 0))
+        applied = self.mock(M.Plugin, "_reassert")
+        self.plugin._schedule_reassert(self.plugin._reassert_repeatedly)
+        await asyncio.sleep(0)
+        worker = M.Plugin._workers["reassert"]
+        for _ in range(100):
+            self.plugin._schedule_reassert(self.plugin._reassert_repeatedly)
+        self.assertEqual(M.Plugin._tasks, [worker])
+        await self.drain()
+        self.assertEqual(applied.call_count, 2)
+
+    async def test_zero_atoms_during_settle_never_become_ready(self):
+        self.mock(M, "_pick_display", return_value=":0")
+        self.mock(M, "_count_gamescope_atoms", side_effect=[0, 44, 44])
+        self.mock(M, "GAMESCOPE_SETTLE_S", 0)
+        self.mock(M, "GAMESCOPE_RETRY_FIRST_S", 0)
+        self.mock(M.Plugin, "_capture_existing_looks")
+        self.mock(M.Plugin, "_configure_for_panel", return_value=False)
+        self.mock(self.plugin, "_reassert_repeatedly", return_value=None)
+        await self.plugin._start_when_ready(start_monitor=False)
+        self.assertEqual(M._pick_display.call_count, 2)
+        self.assertTrue(M.Plugin._state["ready"])
+        await self.drain()
+
+    async def test_monitor_reads_health_and_panel_metadata_with_one_process(self):
+        lines = [f'{M.ATOM_IS_EXTERNAL}(CARDINAL) = 0',
+                 f'{M.ATOM_EDID_PATH}(UTF8_STRING) = "/tmp/panel.bin"',
+                 'GAMESCOPE_FOCUSED_APP(CARDINAL) = 0']
+        commands = []
+        def run(command, **kwargs):
+            commands.append(command)
+            selected = lines if len(command) == 2 else [line for line in lines
+                if any(line.startswith(atom + "(") for atom in command[2:])]
+            return SimpleNamespace(stdout="\n".join(selected), returncode=0)
+        self.mock(M.subprocess, "run", side_effect=run)
+        self.mock(M, "_read_string_atom", side_effect=READ_STRING_ATOM)
+        self.mock(M, "_read_edid", return_value=edid_with_red(0.640, 0.330))
+        self.mock(M, "PANEL_CHECK_INTERVAL_S", 0)
+        self.mock(M, "WATCH_INTERVAL_S", 10000)
+        self.mock(M.Plugin, "_panel_cache_key", None)
+        self.mock(M.Plugin, "_panel_cache_complete", False)
+        real_sleep, ticks = asyncio.sleep, 0
+        async def sleep(delay):
+            nonlocal ticks
+            if delay == M.SUSPEND_POLL_S:
+                ticks += 1
+                if ticks > 1:
+                    raise asyncio.CancelledError()
+            await real_sleep(0)
+        self.mock(M.asyncio, "sleep", side_effect=sleep)
+        with self.assertRaises(asyncio.CancelledError):
+            await self.plugin._monitor_loop()
+        self.assertEqual(commands, [["xprop", "-root"]])
+        self.assertFalse(M.Plugin._state["external_display"])
+        self.assertFalse(M.Plugin._state["hdr_supported"])
+
+    async def test_monitor_external_or_missing_metadata_never_adds_atom_queries(self):
+        read = self.mock(M, "_read_edid")
+        run = self.mock(M.subprocess, "run")
+        for out, expected in ((f'{M.ATOM_IS_EXTERNAL}(CARDINAL) = 1\n'
+                               f'{M.ATOM_EDID_PATH}(UTF8_STRING) = "/tmp/external.bin"', True),
+                              ('GAMESCOPE_FOCUSED_APP(CARDINAL) = 0', None)):
+            with self.subTest(expected=expected):
+                run.return_value = SimpleNamespace(stdout=out)
+                run.reset_mock()
+                count, probe = M.Plugin._monitor_probe()
+                self.assertGreater(count, 0)
+                self.assertIs(probe[0], expected)
+                self.assertIsNone(probe[2])
+                run.assert_called_once()
+        read.assert_not_called()
+
+    async def test_monitor_reuses_string_decoding_and_cached_edid(self):
+        run = self.mock(M.subprocess, "run", return_value=SimpleNamespace(stdout=
+            f'{M.ATOM_IS_EXTERNAL}(CARDINAL) = 0\n'
+            f'{M.ATOM_EDID_PATH}(UTF8_STRING) = "/tmp/a\\\"b\\\\c.bin"'))
+        self.mock(M, "_file_identity", return_value=(1, 2, 128, 3, 4))
+        read = self.mock(M, "_read_edid", return_value=edid_with_red(0.640, 0.330))
+        self.mock(M.Plugin, "_panel_cache_key", None)
+        self.mock(M.Plugin, "_panel_cache_complete", False)
+        _, probe = M.Plugin._monitor_probe()
+        M.Plugin._configure_for_panel(probe)
+        _, cached = M.Plugin._monitor_probe()
+        self.assertEqual(run.call_count, 2)
+        read.assert_called_once_with('/tmp/a"b\\c.bin')
+        self.assertIsNone(cached[2])
+
+    async def test_failed_monitor_root_read_does_not_read_an_edid(self):
+        self.mock(M.subprocess, "run", side_effect=OSError("X unavailable"))
+        read = self.mock(M, "_read_edid")
+        self.assertIsNone(M.Plugin._monitor_probe())
+        read.assert_not_called()

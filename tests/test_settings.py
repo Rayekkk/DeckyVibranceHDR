@@ -10,13 +10,14 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from _fixtures import PluginCase, SAVE_SETTINGS  # installs the loader stand-ins
-import main as M  # noqa: E402
+from _fixtures import PATH_EXISTS, PluginCase, SAVE_SETTINGS  # installs the loader stand-ins first
+import main as M
 
 
 class AtomicSettings(unittest.TestCase):
@@ -302,3 +303,189 @@ class ReadFailure(PluginCase):
         await self.plugin.set_hdr_saturation(1.3)
         self.assertEqual(M.Plugin._state["hdr_saturation"], 1.3)
         self.assertTrue(M.Plugin._settings_dirty)
+
+
+class SettingsWrites(PluginCase):
+    """Saving never blocks controls, and the latest values always reach disk."""
+
+    async def test_disk_full_does_not_prevent_disable_or_restore(self):
+        await self.plugin.set_sdr_enabled(True)
+        self.mock(M.Plugin, "_save", side_effect=OSError("disk full"))
+        await self.plugin.set_sdr_enabled(False)
+        await self.drain()
+        self.assertFalse(M.Plugin._state["sdr_applied"])
+        self.assertEqual(self.live_sdr, 0.8)
+        self.assertIn("disk full", M.Plugin._state["settings_error"])
+        self.assertTrue(M.Plugin._settings_dirty)
+
+    async def test_disabled_hdr_slider_is_persisted(self):
+        await self.plugin.set_hdr_saturation(1.3)
+        await self.drain()
+        M.Plugin._save.assert_called_once()
+        self.builder.assert_not_called()
+
+    async def test_unload_flushes_a_pending_slider_value(self):
+        self.mock(M, "SDR_COALESCE_S", 5)
+        saved = []
+        self.mock(M.Plugin, "_save", side_effect=lambda: saved.append(dict(M.Plugin._state)))
+        await self.plugin.set_hdr_saturation(1.4)
+        await self.plugin._unload()
+        self.assertEqual(saved[-1]["hdr_saturation"], 1.4)
+        self.assertEqual(len(saved), 1)
+
+    async def test_late_rpc_after_unload_cannot_change_flushed_settings(self):
+        M.Plugin._unloading = True
+        before = dict(M.Plugin._state)
+        await self.plugin.set_sdr_saturation(1.4)
+        await self.plugin.set_hdr_saturation(1.4)
+        await self.plugin.set_sdr_enabled(True, 1.4)
+        await self.plugin.set_hdr_enabled(False, 1.4)
+        await self.plugin.reset()
+        self.assertEqual(M.Plugin._state, before)
+        self.assertEqual(M.Plugin._tasks, [])
+
+    async def test_both_sliders_share_one_settings_write(self):
+        await self.plugin.set_sdr_saturation(1.4)
+        await self.plugin.set_hdr_saturation(1.3)
+        await self.drain()
+        M.Plugin._save.assert_called_once()
+
+    async def test_slow_save_does_not_block_disable_reset_or_other_slider(self):
+        await self.plugin.set_sdr_enabled(True)
+        await self.drain()
+        entered, release = threading.Event(), threading.Event()
+        def save(*args):
+            entered.set()
+            release.wait(2)
+        self.mock(M.Plugin, "_save", side_effect=save)
+        await self.plugin.set_hdr_saturation(1.2)
+        pending = []
+        try:
+            self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+            pending = [asyncio.create_task(call) for call in (
+                self.plugin.set_sdr_enabled(False), self.plugin.reset(), self.plugin.set_hdr_saturation(1.4))]
+            done, _ = await asyncio.wait(pending, timeout=0.2)
+            self.assertEqual(len(done), len(pending), "disk IO held the control mutation lock")
+            self.assertEqual(self.live_sdr, 0.8)
+        finally:
+            release.set()
+            await asyncio.gather(*pending)
+            await self.drain()
+
+    async def test_disable_restores_before_slow_persistence_finishes(self):
+        await self.plugin.set_sdr_enabled(True)
+        await self.drain()
+        entered, release = threading.Event(), threading.Event()
+        def save(*args):
+            entered.set()
+            release.wait(2)
+        self.mock(M.Plugin, "_save", side_effect=save)
+        disable = asyncio.create_task(self.plugin.set_sdr_enabled(False))
+        try:
+            self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+            self.assertTrue(disable.done(), "disable RPC waits for filesystem persistence")
+            self.assertFalse(M.Plugin._state["sdr_applied"])
+            self.assertEqual(self.live_sdr, 0.8)
+        finally:
+            release.set()
+            await disable
+            await self.drain()
+
+    async def test_new_edits_survive_completion_of_an_older_disk_snapshot(self):
+        first, second = threading.Event(), threading.Event()
+        release_first, release_second = threading.Event(), threading.Event()
+        snapshots = []
+        def save(values):
+            snapshots.append(dict(values))
+            if len(snapshots) == 1:
+                first.set()
+                release_first.wait(2)
+            elif len(snapshots) == 2:
+                second.set()
+                release_second.wait(2)
+        self.mock(M.Plugin, "_save", side_effect=save)
+        await self.plugin.set_hdr_saturation(1.2)
+        try:
+            self.assertTrue(await asyncio.to_thread(first.wait, 1))
+            worker = M.Plugin._workers["settings"]
+            await self.plugin.set_hdr_saturation(1.4)
+            await self.plugin.set_sdr_saturation(1.5)
+            generation = M.Plugin._save_generation
+            for _ in range(30):
+                await self.plugin.set_hdr_saturation(1.4)
+                self.plugin._retry_settings_save()
+            self.assertEqual(M.Plugin._save_generation, generation)
+            self.assertIs(M.Plugin._workers["settings"], worker)
+            release_first.set()
+            self.assertTrue(await asyncio.to_thread(second.wait, 1))
+            self.assertTrue(M.Plugin._settings_dirty, "older completion acknowledged unsaved edits")
+            self.assertEqual(snapshots[0]["hdr_saturation"], 1.2)
+            self.assertEqual(snapshots[1]["hdr_saturation"], 1.4)
+            self.assertEqual(snapshots[1]["sdr_saturation"], 1.5)
+        finally:
+            release_first.set()
+            release_second.set()
+            await self.drain()
+        self.assertEqual(len(snapshots), 2)
+        self.assertFalse(M.Plugin._settings_dirty)
+
+    async def test_latest_disk_failure_remains_visible_then_same_value_retries(self):
+        first, release = threading.Event(), threading.Event()
+        snapshots = []
+        def save(values):
+            snapshots.append(dict(values))
+            if len(snapshots) == 1:
+                first.set()
+                release.wait(2)
+            elif len(snapshots) == 2:
+                raise OSError("latest snapshot failed")
+        self.mock(M.Plugin, "_save", side_effect=save)
+        await self.plugin.set_hdr_saturation(1.2)
+        try:
+            self.assertTrue(await asyncio.to_thread(first.wait, 1))
+            await self.plugin.set_hdr_saturation(1.4)
+        finally:
+            release.set()
+            await self.drain()
+        self.assertTrue(M.Plugin._settings_dirty)
+        self.assertIn("latest snapshot failed", M.Plugin._state["settings_error"])
+        await self.plugin.set_hdr_saturation(1.4)
+        await self.drain()
+        self.assertEqual([value["hdr_saturation"] for value in snapshots], [1.2, 1.4, 1.4])
+        self.assertFalse(M.Plugin._settings_dirty)
+        self.assertEqual(M.Plugin._state["settings_error"], "")
+
+    async def test_unload_serializes_behind_an_older_write_and_flushes_latest_values(self):
+        entered, release = threading.Event(), threading.Event()
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            path.write_text('{"unrelated": "keep"}', encoding="utf-8")
+            self.mock(M, "settings", SimpleNamespace(path=str(path), settings={"unrelated": "keep"}))
+            self.mock(M.os.path, "exists", side_effect=PATH_EXISTS)
+            def save(values=None):
+                with M._settings_lock:
+                    if values is not None:
+                        entered.set()
+                        release.wait(2)
+                    SAVE_SETTINGS(values)
+            self.mock(M.Plugin, "_save", side_effect=save)
+            await self.plugin.set_hdr_saturation(1.2)
+            unload = None
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+                await self.plugin.set_hdr_saturation(1.4)
+                unload = asyncio.create_task(self.plugin._unload())
+                await asyncio.sleep(0)
+                self.assertTrue(M.Plugin._unloading)
+                late = await self.plugin.set_hdr_saturation(1.5)
+                self.assertEqual(late["hdr_saturation"], 1.4)
+            finally:
+                release.set()
+                if unload is not None:
+                    await unload
+                else:
+                    await self.drain()
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["hdr_saturation"], 1.4)
+            self.assertEqual(saved["unrelated"], "keep")
+            self.assertFalse(M.Plugin._settings_dirty)

@@ -22,10 +22,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import _fixtures  # noqa: F401  installs the loader stand-ins
-import lego_updater as U  # noqa: E402
-import main  # noqa: E402
-import main as M  # noqa: E402
+import _fixtures  # noqa: F401  installs the loader stand-ins first
+import main as M
+import lego_updater as U
 
 
 class Updater(unittest.TestCase):
@@ -381,10 +380,10 @@ class UpdateAssetValidation(unittest.TestCase):
         base = "https://github.com/Rayekkk/DeckyVibranceHDR/releases/download/2.0.0/"
         data = {"tag_name": "2.0.0",
                 "assets": [{"name": n, "browser_download_url": base + n} for n in names]}
-        with patch.object(main.updater, "plugin_version", return_value="1.0.0"), \
-                patch.object(main.updater, "open_url",
+        with patch.object(M.updater, "plugin_version", return_value="1.0.0"), \
+                patch.object(M.updater, "open_url",
                              return_value=io.BytesIO(json.dumps(data).encode())):
-            return asyncio.run(main.Plugin().check_for_updates())
+            return asyncio.run(M.Plugin().check_for_updates())
 
     def test_update_without_the_expected_zip_is_not_downloadable(self):
         info = self.check("source.zip")
