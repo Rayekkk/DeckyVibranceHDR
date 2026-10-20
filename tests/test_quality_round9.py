@@ -87,20 +87,21 @@ class ReadFailure(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(path.read_text(), "{broken settings")
             self.assertEqual(store.settings, {})
 
-    async def test_only_fresh_install_accepts_empty_manager_file(self):
+    async def test_empty_file_loads_as_defaults_but_missing_file_is_retried(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "settings.json"
-            path.write_text("")
-            self.mock(M, "settings", SimpleNamespace(path=str(path), settings={}))
+            self.mock(M, "settings", SimpleNamespace(path=str(path), settings={"stale": 1}))
             self.mock(M, "_settings_new", False)
-            with self.assertRaises(json.JSONDecodeError):
+            # A previously existing file that is now missing is not a fresh install.
+            with self.assertRaises(FileNotFoundError):
                 M._read_settings()
-            M._settings_new = True
-            M._read_settings()
-            self.assertEqual(M.settings.settings, {})
-            self.assertFalse(M._settings_new)
-            with self.assertRaises(json.JSONDecodeError):
+            # An empty file - first-install manager file, or 1.0.0's truncating
+            # write cut short - has nothing to protect and must not block startup.
+            for empty in ("", "  \n"):
+                path.write_text(empty)
                 M._read_settings()
+                self.assertEqual(M.settings.settings, {})
+                self.assertEqual(path.read_text(), empty)
 
     async def test_invalid_json_shape_is_rejected_and_unknown_fields_survive(self):
         with tempfile.TemporaryDirectory() as folder:

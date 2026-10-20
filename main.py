@@ -212,8 +212,8 @@ DEFAULT_SETTINGS = {
 }
 
 # Decky's manager creates an empty file on first install and suppresses read
-# errors. Record absence before construction so an existing damaged file is
-# never mistaken for a fresh installation.
+# errors. Record absence before construction, so a file that existed and later
+# goes missing (an unmounted card, say) is retried instead of replaced.
 try:
     os.stat(os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json"))
     _settings_new = False
@@ -270,7 +270,10 @@ def _read_settings():
         finally:
             if descriptor is not None:
                 os.close(descriptor)
-        values = {} if _settings_new and not text.strip() else json.loads(text)
+        # An empty file holds nothing to protect. Decky creates one on first
+        # install, and 1.0.0 truncated before writing, so an interrupted first
+        # save or power loss left one behind that could never load again.
+        values = {} if not text.strip() else json.loads(text)
         if not isinstance(values, dict):
             raise ValueError("settings must contain a JSON object")
         settings.settings = values
