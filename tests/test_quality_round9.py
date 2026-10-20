@@ -70,6 +70,7 @@ class ReadFailure(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(*M.Plugin._tasks)
         self.assertEqual(calls, 2)
         self.assertTrue(M.Plugin._settings_loaded)
+        self.assertTrue(M.Plugin._state["settings_loaded"])
         for key, value in saved.items():
             self.assertEqual(M.Plugin._state[key], value)
         self.assertEqual(M.Plugin._state["settings_error"], "")

@@ -888,6 +888,7 @@ class Plugin:
         "sdr_look_error": "",
         "hdr_error": "",
         "settings_error": "",
+        "settings_loaded": False,
         "generating": False,
         "sdr_generating": False,
         "conflict": "",
@@ -1998,7 +1999,7 @@ class Plugin:
         global _lut_writes_disabled, _xprop_timeout
         decky.logger.info(f"{LOG} startup v{updater.plugin_version()}")
         Plugin._unloading = False
-        Plugin._settings_loaded = False
+        Plugin._settings_loaded = Plugin._state["settings_loaded"] = False
         Plugin._settings_dirty = False
         _xprop_timeout = 3.0
         worker = _native_lut_python() or "in-process"
@@ -2047,7 +2048,7 @@ class Plugin:
             Plugin._state["sdr_saturation"], SDR_MIN, SDR_MAX_WIDE)
         Plugin._state["hdr_saturation"] = _clamp(
             Plugin._state["hdr_saturation"], HDR_MIN, HDR_MAX)
-        Plugin._settings_loaded = True
+        Plugin._settings_loaded = Plugin._state["settings_loaded"] = True
         # Persist repaired/migrated fields even if no gamescope session arrives.
         self._schedule_save()
 

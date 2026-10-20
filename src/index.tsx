@@ -30,6 +30,7 @@ interface State {
   sdr_look_error: string;
   hdr_error: string;
   settings_error: string;
+  settings_loaded: boolean;
   generating: boolean;
   conflict: string;
   external_display: boolean;
@@ -246,8 +247,7 @@ const Content: FC = () => {
           />
         </PanelSectionRow>
         {state.settings_error && <PanelSectionRow>
-          <Field label={state.reason.startsWith("could not load settings:")
-            ? "Could not load settings" : "Settings not saved"} description={state.settings_error} />
+          <Field label={state.settings_loaded ? "Settings not saved" : "Could not load settings"} description={state.settings_error} />
         </PanelSectionRow>}
         {connectionError && <PanelSectionRow><ButtonItem onClick={() => void sync.refresh()}>
           Retry

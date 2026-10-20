@@ -24,7 +24,7 @@ test("built frontend connects to Decky using host globals and manifest", async (
     globalThis.DFL[name] = name;
   let backend = { ready: true, sdr_enabled: true, hdr_enabled: true, sdr_saturation: 1,
     hdr_saturation: 1, sdr_applied: true, hdr_applied: false, hdr_applied_saturation: null,
-    sdr_error: "", sdr_look_error: "", hdr_error: "", settings_error: "", generating: false,
+    sdr_error: "", sdr_look_error: "", hdr_error: "", settings_error: "", settings_loaded: true, generating: false,
     conflict: "", external_display: false, sdr_generating: false, hdr_supported: true,
     sdr_min: 1, sdr_max: 3, sdr_soft_limit: 2, hdr_min: 1, hdr_max: 1.5, hdr_soft_limit: 1.3 };
   const calls = [], reads = [];
@@ -91,13 +91,19 @@ test("built frontend connects to Decky using host globals and manifest", async (
     assert.deepEqual(calls.at(-1), ["reset"]);
     assert.equal(states[0].hdr_enabled, false);
     assert.equal(states[0].hdr_saturation, 1);
-    backend = { ...backend, ready: false, reason: "could not load settings: invalid JSON",
-      settings_error: "could not load settings: invalid JSON" };
+    // The label follows settings_loaded, not the wording of the backend reason.
+    backend = { ...backend, ready: false, reason: "settings unreadable", settings_loaded: false,
+      settings_error: "invalid JSON" };
     await toggle.props.onChange(false);
     const blocked = nodes(render()).filter(node => node.type === "Field");
     assert.ok(blocked.some(node => node.props.label === "Could not load settings"));
+    backend = { ...backend, reason: "could not load settings: lookalike", settings_loaded: true,
+      settings_error: "disk full" };
+    await toggle.props.onChange(false);
+    const unsaved = nodes(render()).filter(node => node.type === "Field");
+    assert.ok(unsaved.some(node => node.props.label === "Settings not saved"));
     assert.ok(blocked.every(node => !String(node.props.description).includes("only works in Game Mode")));
-    backend = { ...backend, ready: true, reason: "ready", settings_error: "" };
+    backend = { ...backend, ready: true, reason: "ready", settings_error: "", settings_loaded: true };
     await toggle.props.onChange(false);
     const updateComponent = nodes(render()).find(node => typeof node.type === "function" && node.type.name === "UpdateSection");
     assert.ok(updateComponent);
