@@ -126,8 +126,10 @@ def supports_pq(blob: bytes):
         found = None
         try:
             if block[0] == CTA_EXTENSION_TAG:
-                # CTA-861: d=0 means no timings and no data blocks at all.
-                end = block[2] or 4
+                # CTA-861 says d=0 means no data blocks, but a panel that lists
+                # them anyway is believed: a false yes only shows an inert HDR
+                # control, a false no hides a working one and saves it off.
+                end = block[2] or 127
                 if not 4 <= end <= 127:
                     return None
                 found = _cta_collection_pq(block, 4, end)

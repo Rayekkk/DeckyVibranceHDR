@@ -12,8 +12,6 @@ All notable changes to Decky Vibrance HDR, newest first.
 - An empty settings file no longer keeps the controls paused forever. It can be
   left by an interrupted first start, or by version 1.0.0 after a power loss,
   and now loads as defaults. A damaged file with content is still kept intact.
-- HDR support detection follows the CTA-861 rule for extension blocks that
-  carry no data blocks, so leftover bytes there cannot be read as HDR metadata.
 - The menu tells **Could not load settings** and **Settings not saved** apart
   from the backend state rather than from the wording of the message.
 - HDR at 100% no longer briefly shows **building the LUT...** for a table it

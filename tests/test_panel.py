@@ -93,12 +93,13 @@ class HdrCapability(unittest.TestCase):
     def test_a_cta_block_with_no_hdr_metadata_is_an_answer(self):
         self.assertFalse(M.vibrance_edid.supports_pq(self._edid(None)))
 
-    def test_dtd_offset_zero_means_no_data_blocks(self):
-        """CTA-861 d=0: no data block collection, so bytes after the header -
-        here an HDR block left over - must not be read as one."""
+    def test_dtd_offset_zero_still_reads_a_listed_hdr_block(self):
+        """CTA-861 d=0 should mean no data blocks. A non-conformant panel that
+        lists PQ there is believed on purpose: hiding a working HDR control
+        and saving it off is worse than showing one that does nothing."""
         blob = bytearray(self._edid(0b0000_0101))
         blob[128 + 2] = 0
-        self.assertFalse(M.vibrance_edid.supports_pq(_harness.valid_edid(blob)))
+        self.assertTrue(M.vibrance_edid.supports_pq(_harness.valid_edid(blob)))
 
     def test_a_base_only_edid_is_a_definite_no(self):
         """HDR metadata has nowhere else to live, so a complete EDID without it
