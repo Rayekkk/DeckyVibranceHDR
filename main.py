@@ -111,31 +111,25 @@ WIDE_GAMUT_RED_Y = 0.320
 SDR_MIN = 1.0
 SDR_MAX_WIDE = 3.0
 SDR_SOFT_WIDE = 2.0
-SDR_MAX_STANDARD = 2.0
-SDR_SOFT_STANDARD = 1.5
 
 # Where the atom's own neutral sits, and how much of the slider it can carry.
 # Both replaced at startup once the panel is known.
 SDR_NEUTRAL_ATOM = 1.0
 SDR_ATOM_SPAN = 2.0
 
-# EXPERIMENTAL, and only ever reached on a standard-gamut panel. There cfit()
-# stops responding at atom 1.0, which is the slider's 200%, so the top third has
-# nothing left to push. The remainder is carried by a look on the SDR path -
-# GAMESCOPE_COLOR_LOOK_G22, the twin of the atom the HDR half already uses, in
-# the gamma 2.2 domain.
-#
-# A wide-gamut panel never gets here: its atom span is the whole slider, so the
-# remainder is always zero and no look is ever written. Setting this to False
-# puts a standard-gamut panel back to a 100-200% slider and nothing else.
 # gamescope's own "nobody has set this": both branches of buildSDRColorimetry
 # turn a negative wideness into that branch's native gamut. Writing it back is
 # the only value that means "off" on either kind of panel - 1.0 is neutral on
 # one branch and the harshest setting there is on the other.
 SDR_UNSET = -1.0
 
-SDR_LOOK_ENABLED = True
-SDR_MAX_STANDARD_WITH_LOOK = 3.0
+# Only ever reached on a standard-gamut panel. There cfit() stops responding at
+# atom 1.0, which is the slider's 200%, so the top third has nothing left to
+# push. The remainder is carried by a look on the SDR path -
+# GAMESCOPE_COLOR_LOOK_G22, the twin of the atom the HDR half already uses, in
+# the gamma 2.2 domain. A wide-gamut panel never gets here: its atom span is
+# the whole slider, so the remainder is always zero and no look is written.
+SDR_MAX_STANDARD = 3.0
 
 # Expressed as a rate rather than a ceiling on purpose: it means a given slider
 # position keeps asking for the same thing when the top of the range moves, so
@@ -148,7 +142,7 @@ SDR_LOOK_CEILING = 1.5
 
 # Where the LUT starts hard-clipping channels, which is the same look value the
 # HDR half warns at - the maths is identical, only the transfer differs.
-SDR_SOFT_STANDARD_WITH_LOOK = 2.6
+SDR_SOFT_STANDARD = 2.6
 
 # HDR is our own LUT, so the ceiling is set by where the maths stops paying for
 # itself rather than by gamescope. Past about 1.3 a boost hard-clips channels at
@@ -493,10 +487,6 @@ def _file_identity(path):
         return None
 
 
-def _edid_file_identity(path):
-    return _file_identity(path)
-
-
 def _display_session_identity():
     """The local X socket identifies a session even at the same DISPLAY."""
     number = DISPLAY.removeprefix(":").split(".", 1)[0]
@@ -604,7 +594,8 @@ def _edid_supports_pq(blob: bytes):
         found = None
         try:
             if block[0] == CTA_EXTENSION_TAG:
-                end = block[2] or 127
+                # CTA-861: d=0 means no timings and no data blocks at all.
+                end = block[2] or 4
                 if not 4 <= end <= 127:
                     return None
                 found = _cta_collection_pq(block, 4, end)
@@ -949,17 +940,8 @@ class Plugin:
         return {"version": updater.plugin_version()}
 
     async def check_for_updates(self) -> dict:
-        info = await _offload(updater.check)
-        if info.get("update_available"):
-            expected = f"DeckyVibranceHDR-{info.get('latest_version', '')}.zip"
-            if (info.get("asset_name") != expected
-                    or not info.get("download_url")):
-                info["download_url"] = None
-                info["asset_name"] = None
-                info["error"] = (
-                    f"Release v{info.get('latest_version', '?')} has no "
-                    f"installable {expected} asset yet")
-        return info
+        # The updater already offers only the exact DeckyVibranceHDR-<v>.zip.
+        return await _offload(updater.check)
 
     async def perform_update(self, download_url: str, asset_name: str) -> dict:
         return await _offload(updater.download, download_url, asset_name)
@@ -991,8 +973,7 @@ class Plugin:
             self._schedule_save()
             if enabled and not Plugin._disconnected:
                 await _offload(Plugin._apply_sdr)
-                if SDR_LOOK_ENABLED:
-                    self._schedule_sdr_look()
+                self._schedule_sdr_look()
             elif not enabled:
                 await _offload(Plugin._release_sdr)
             return dict(Plugin._state)
@@ -1040,8 +1021,7 @@ class Plugin:
                 self._retry_settings_save()
             if changed:
                 self._schedule_sdr()
-                if SDR_LOOK_ENABLED:
-                    self._schedule_sdr_look()
+                self._schedule_sdr_look()
             else:
                 target, _look = _sdr_split(value)
                 if (Plugin._state["sdr_enabled"] and not Plugin._disconnected
@@ -1626,7 +1606,7 @@ class Plugin:
              Plugin._state["generating"], Plugin._state["hdr_saturation"],
              Plugin._state["hdr_applied_saturation"], Plugin._hdr_look_path,
              self._schedule_hdr),
-            ("sdr_look", SDR_LOOK_ENABLED and Plugin._state["sdr_enabled"],
+            ("sdr_look", Plugin._state["sdr_enabled"],
              Plugin._state["sdr_generating"],
              _sdr_split(Plugin._state["sdr_saturation"])[1],
              Plugin._state["sdr_look_saturation"], Plugin._sdr_look_path,
@@ -1697,7 +1677,7 @@ class Plugin:
             edid_path = None if external_value is True else _read_string_atom(ATOM_EDID_PATH)
         else:
             external_value, edid_path = metadata
-        identity = _edid_file_identity(edid_path)
+        identity = _file_identity(edid_path)
         cache_key = (("edid", edid_path, identity) if external_value is None else
                      ("external", bool(external_value), edid_path, identity))
         cached = cache_key == Plugin._panel_cache_key and Plugin._panel_cache_complete
@@ -1741,13 +1721,9 @@ class Plugin:
 
         if wide is False:
             SDR_NEUTRAL_ATOM, SDR_ATOM_SPAN = 0.0, 1.0
-            if SDR_LOOK_ENABLED:
-                # The atom gives out at 200%; the look carries the rest.
-                Plugin._state["sdr_max"] = SDR_MAX_STANDARD_WITH_LOOK
-                Plugin._state["sdr_soft_limit"] = SDR_SOFT_STANDARD_WITH_LOOK
-            else:
-                Plugin._state["sdr_max"] = SDR_MAX_STANDARD
-                Plugin._state["sdr_soft_limit"] = SDR_SOFT_STANDARD
+            # The atom gives out at 200%; the look carries the rest.
+            Plugin._state["sdr_max"] = SDR_MAX_STANDARD
+            Plugin._state["sdr_soft_limit"] = SDR_SOFT_STANDARD
         else:
             SDR_NEUTRAL_ATOM, SDR_ATOM_SPAN = 1.0, 2.0
             Plugin._state["sdr_max"] = SDR_MAX_WIDE
@@ -1958,8 +1934,7 @@ class Plugin:
                     Plugin._sdr_baseline = live
             if Plugin._state["sdr_enabled"]:
                 await _offload(Plugin._apply_sdr)
-                if SDR_LOOK_ENABLED:
-                    self._schedule_sdr_look()
+                self._schedule_sdr_look()
             else:
                 await _offload(Plugin._release_sdr)
             if Plugin._state["hdr_enabled"]:
@@ -2174,11 +2149,10 @@ class Plugin:
             if not Plugin._state["external_display"]:
                 if Plugin._state["sdr_enabled"]:
                     await _offload(Plugin._apply_sdr)
-                    if SDR_LOOK_ENABLED:
-                        if preserve and not panel_changed:
-                            self._retry_pending_looks("sdr_look")
-                        else:
-                            self._schedule_sdr_look()
+                    if preserve and not panel_changed:
+                        self._retry_pending_looks("sdr_look")
+                    else:
+                        self._schedule_sdr_look()
                 else:
                     await _offload(Plugin._release_sdr)
                 if Plugin._state["hdr_enabled"]:

@@ -5,11 +5,14 @@
 """Pure logic tests. These run anywhere, including on a CI runner."""
 
 import asyncio
+import io
+import json
 import os
 import struct
 import sys
 import threading
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -221,8 +224,7 @@ class Clamping(unittest.TestCase):
         would stay green."""
         self.assertEqual(main.SDR_MIN, 1.0)
         self.assertEqual(main.SDR_MAX_WIDE, 3.0)
-        self.assertEqual(main.SDR_MAX_STANDARD, 2.0)
-        self.assertEqual(main.SDR_MAX_STANDARD_WITH_LOOK, 3.0)
+        self.assertEqual(main.SDR_MAX_STANDARD, 3.0)
         self.assertEqual(main.HDR_MIN, 1.0)
         self.assertEqual(main.HDR_MAX, 1.5)
 
@@ -779,42 +781,18 @@ class CapabilityGating(unittest.TestCase):
         self.assertEqual(main.SDR_NEUTRAL_ATOM, 0.0)
         self.assertEqual(main.SDR_ATOM_SPAN, 1.0)
 
-    def test_the_look_switch_is_what_decides_the_standard_ceiling(self):
-        """SDR_LOOK_ENABLED is the revert switch for the whole experiment, so
-        both of its positions are pinned."""
-        real = main.SDR_LOOK_ENABLED
-        try:
-            main.SDR_LOOK_ENABLED = True
-            self._boot(wide=False, pq=True)
-            self.assertEqual(main.Plugin._state["sdr_max"],
-                             main.SDR_MAX_STANDARD_WITH_LOOK)
-            self.assertEqual(main.Plugin._state["sdr_soft_limit"],
-                             main.SDR_SOFT_STANDARD_WITH_LOOK)
+    def test_the_look_carries_a_standard_panel_to_the_full_range(self):
+        self._boot(wide=False, pq=True)
+        self.assertEqual(main.Plugin._state["sdr_max"], main.SDR_MAX_STANDARD)
+        self.assertEqual(main.Plugin._state["sdr_soft_limit"], main.SDR_SOFT_STANDARD)
 
-            main.SDR_LOOK_ENABLED = False
-            self._boot(wide=False, pq=True)
-            self.assertEqual(main.Plugin._state["sdr_max"],
-                             main.SDR_MAX_STANDARD)
-            self.assertEqual(main.Plugin._state["sdr_soft_limit"],
-                             main.SDR_SOFT_STANDARD)
-        finally:
-            main.SDR_LOOK_ENABLED = real
-
-    def test_a_wide_gamut_panel_is_unaffected_by_the_switch(self):
-        """The Legion Go 2 must land on exactly the same numbers either way."""
-        real = main.SDR_LOOK_ENABLED
-        try:
-            for setting in (True, False):
-                main.SDR_LOOK_ENABLED = setting
-                self._boot(wide=True, pq=True)
-                self.assertEqual(main.SDR_NEUTRAL_ATOM, 1.0, str(setting))
-                self.assertEqual(main.SDR_ATOM_SPAN, 2.0, str(setting))
-                self.assertEqual(main.Plugin._state["sdr_max"],
-                                 main.SDR_MAX_WIDE, str(setting))
-                self.assertEqual(main.Plugin._state["sdr_soft_limit"],
-                                 main.SDR_SOFT_WIDE, str(setting))
-        finally:
-            main.SDR_LOOK_ENABLED = real
+    def test_a_wide_gamut_panel_keeps_its_own_numbers(self):
+        """The Legion Go 2 must not pick up the standard-gamut mapping."""
+        self._boot(wide=True, pq=True)
+        self.assertEqual(main.SDR_NEUTRAL_ATOM, 1.0)
+        self.assertEqual(main.SDR_ATOM_SPAN, 2.0)
+        self.assertEqual(main.Plugin._state["sdr_max"], main.SDR_MAX_WIDE)
+        self.assertEqual(main.Plugin._state["sdr_soft_limit"], main.SDR_SOFT_WIDE)
 
     def test_an_edid_we_cannot_read_withdraws_nothing(self):
         """Ignorance is not a no - a missing atom must not cost a user a
@@ -909,6 +887,13 @@ class HdrCapability(unittest.TestCase):
 
     def test_a_cta_block_with_no_hdr_metadata_is_an_answer(self):
         self.assertFalse(main._edid_supports_pq(self._edid(None)))
+
+    def test_dtd_offset_zero_means_no_data_blocks(self):
+        """CTA-861 d=0: no data block collection, so bytes after the header -
+        here an HDR block left over - must not be read as one."""
+        blob = bytearray(self._edid(0b0000_0101))
+        blob[128 + 2] = 0
+        self.assertFalse(main._edid_supports_pq(_harness.valid_edid(blob)))
 
     def test_a_base_only_edid_is_a_definite_no(self):
         """HDR metadata has nowhere else to live, so a complete EDID without it
@@ -1014,7 +999,7 @@ class SdrLookSplit(unittest.TestCase):
     def test_the_top_of_the_slider_asks_the_look_for_its_ceiling(self):
         self._standard()
         self.assertAlmostEqual(
-            main._sdr_split(main.SDR_MAX_STANDARD_WITH_LOOK)[1],
+            main._sdr_split(main.SDR_MAX_STANDARD)[1],
             main.SDR_LOOK_CEILING)
 
     def test_raising_the_maximum_did_not_weaken_what_was_below_it(self):
@@ -1044,7 +1029,7 @@ class SdrLookSplit(unittest.TestCase):
         """Identical maths, so the look value that starts clipping is the same;
         only the slider position it corresponds to differs."""
         self._standard()
-        at_warning = main._sdr_split(main.SDR_SOFT_STANDARD_WITH_LOOK)[1]
+        at_warning = main._sdr_split(main.SDR_SOFT_STANDARD)[1]
         self.assertAlmostEqual(at_warning, main.HDR_SOFT_LIMIT, places=6)
 
 
@@ -1612,34 +1597,24 @@ class ExternalDisplay(unittest.TestCase):
 
 class UpdateAssetValidation(unittest.TestCase):
 
-    def setUp(self):
-        self.real_check = main.updater.check
-
-    def tearDown(self):
-        main.updater.check = self.real_check
+    def check(self, *names):
+        base = "https://github.com/Rayekkk/DeckyVibranceHDR/releases/download/2.0.0/"
+        data = {"tag_name": "2.0.0",
+                "assets": [{"name": n, "browser_download_url": base + n} for n in names]}
+        with patch.object(main.updater, "plugin_version", return_value="1.0.0"), \
+                patch.object(main.updater, "open_url",
+                             return_value=io.BytesIO(json.dumps(data).encode())):
+            return asyncio.run(main.Plugin().check_for_updates())
 
     def test_update_without_the_expected_zip_is_not_downloadable(self):
-        main.updater.check = lambda: {
-            "current_version": "1.0.0",
-            "latest_version": "2.0.0",
-            "update_available": True,
-            "download_url": "https://example.invalid/source.zip",
-            "asset_name": "source.zip",
-        }
-        info = asyncio.run(main.Plugin().check_for_updates())
-        self.assertIsNone(info["download_url"])
-        self.assertIsNone(info["asset_name"])
+        info = self.check("source.zip")
+        self.assertTrue(info["update_available"])
+        self.assertIsNone(info.get("download_url"))
+        self.assertIsNone(info.get("asset_name"))
         self.assertIn("DeckyVibranceHDR-2.0.0.zip", info["error"])
 
     def test_exact_release_zip_remains_downloadable(self):
         expected = "DeckyVibranceHDR-2.0.0.zip"
-        main.updater.check = lambda: {
-            "current_version": "1.0.0",
-            "latest_version": "2.0.0",
-            "update_available": True,
-            "download_url": f"https://example.invalid/{expected}",
-            "asset_name": expected,
-        }
-        info = asyncio.run(main.Plugin().check_for_updates())
+        info = self.check("source.zip", expected)
         self.assertNotIn("error", info)
         self.assertEqual(info["asset_name"], expected)

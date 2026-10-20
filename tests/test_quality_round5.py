@@ -222,7 +222,7 @@ class Latency(unittest.IsolatedAsyncioTestCase):
         run = self.mock(M.subprocess, "run", return_value=SimpleNamespace(stdout=
             f'{M.ATOM_IS_EXTERNAL}(CARDINAL) = 0\n'
             f'{M.ATOM_EDID_PATH}(UTF8_STRING) = "/tmp/a\\\"b\\\\c.bin"'))
-        self.mock(M, "_edid_file_identity", return_value=(1, 2, 128, 3, 4))
+        self.mock(M, "_file_identity", return_value=(1, 2, 128, 3, 4))
         read = self.mock(M, "_read_edid", return_value=L.PanelDetection._edid(0.640, 0.330))
         self.mock(M.Plugin, "_panel_cache_key", None)
         self.mock(M.Plugin, "_panel_cache_complete", False)
