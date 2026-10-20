@@ -2,6 +2,31 @@
 
 All notable changes to Decky Vibrance HDR, newest first.
 
+## [Unreleased]
+
+### Fixed
+
+- A single slow display query no longer drops the plugin into **Plugin not
+  ready** for a moment, and can no longer leave a false "another plugin"
+  conflict warning behind. Only a real gamescope restart reconnects.
+- An empty settings file no longer keeps the controls paused forever. It can be
+  left by an interrupted first start, or by version 1.0.0 after a power loss,
+  and now loads as defaults. A damaged file with content is still kept intact.
+- HDR support detection follows the CTA-861 rule for extension blocks that
+  carry no data blocks, so leftover bytes there cannot be read as HDR metadata.
+- The menu tells **Could not load settings** and **Settings not saved** apart
+  from the backend state rather than from the wording of the message.
+- HDR at 100% no longer briefly shows **building the LUT...** for a table it
+  never builds.
+
+### Internal
+
+- The SDR and HDR colour tables share one code path, and EDID parsing lives in
+  `vibrance_edid.py`.
+- Tests are grouped by topic instead of by audit round, and every suite also
+  passes on its own.
+- Audit reports moved to the `1.1.1` tag; [docs/AUDITS.md](docs/AUDITS.md) links them.
+
 ## [1.1.1] - 2026-10-11
 
 ### Fixed
@@ -36,7 +61,7 @@ All notable changes to Decky Vibrance HDR, newest first.
 - Added regressions for startup/settings failures, files that could block reads,
   slow replies, menu reopening and update results.
 - Checked the fixes on Legion Go 2 with SteamOS and Odin 3 with Armada, including
-  real backend calls and colour-table output. See the [device audit](docs/FULL_AUDIT_2026-10-11_LEGION_REGRESSION.md)
+  real backend calls and colour-table output. See the [device audit](https://github.com/Rayekkk/DeckyVibranceHDR/blob/1.1.1/docs/FULL_AUDIT_2026-10-11_LEGION_REGRESSION.md)
   for the methods and limits. Version 1.1.1 keeps the same audited runtime;
   these changes do not fix Decky's own reload issue or claim new physical
   controller, sleep/wake or docking tests.

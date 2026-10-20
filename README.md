@@ -245,13 +245,13 @@ To measure LUT generation locally, use `python scripts/benchmark_lut.py`.
 <details>
 <summary><b>Audit reports and what was tested</b></summary>
 
-- [Final Legion regression and renewed Odin validation](docs/FULL_AUDIT_2026-10-11_LEGION_REGRESSION.md): settings/startup fixes, ordinary SteamOS and Armada checks, final payload comparisons, menu/backend measurements and independent device verification.
-- [Round-9 quality audit](docs/FULL_AUDIT_2026-10-10_ROUND9.md): frontend request ordering, saved settings and updater remount regressions.
-- [Odin audit](docs/FULL_AUDIT_2026-10-10_ODIN3.md): blocking metadata reads, native-worker checks and Decky lifecycle diagnosis.
-- [Earlier Armada performance work](docs/FIX_ARMADA_RESPONSIVENESS_2026-10-10.md): native ARM LUT and `xprop` execution.
+[docs/AUDITS.md](docs/AUDITS.md) lists every audit and device report, kept at
+the `1.1.1` tag: the final Legion regression and Odin validation, the Odin/Armada
+audit, the native ARM performance work and the code-quality rounds.
 
 The underlying fixes were checked on the devices before the version-only 1.1.1
-bump. The latest Odin menu checks used the actual mounted controls' handlers;
+bump. Changes made after 1.1.1 are covered by the automated suites only until
+the next device pass. The latest Odin menu checks used the actual mounted controls' handlers;
 Legion also used native simulated keyboard input. These are not physical gamepad,
 colorimeter or HDR-game output checks. Sleep/wake and docking were not exercised
 in the latest round. Automated tests and readable LUT files do not replace those
