@@ -2,28 +2,122 @@
 
 All notable changes to Decky Vibrance HDR, newest first.
 
-## [Unreleased]
+## [1.2.0] - 2026-10-21
 
 ### Fixed
+
+#### Settings
+
+- An empty settings file no longer keeps the controls paused forever. It can be
+  left by an interrupted first start, or by version 1.0.0 after a power loss,
+  and now loads as defaults.
+- A settings file that cannot be used (broken JSON, wrong content, or nesting
+  deep enough to break the reader) no longer stops the plugin or stalls
+  startup. It is kept as `settings.json.corrupt-<time>` and the plugin starts
+  from defaults; nothing is deleted, and **Settings reset** in the menu names
+  the kept file.
+- Your last slider change is saved even when a slow display server delays
+  shutdown.
+- Disabling or uninstalling the plugin, or restarting Decky, saves your last
+  slider change and puts the original colours back whenever Decky lets the
+  plugin shut down. On Odin 3 it usually managed neither: Decky stopped it
+  halfway, and the effect stayed on screen until gamescope restarted. Decky can still
+  stop a plugin before its shutdown starts
+  ([decky-loader#975](https://github.com/SteamDeckHomebrew/decky-loader/issues/975)).
+  After a restart the plugin applies your settings again anyway; after
+  disabling or uninstalling, the colours can stay until gamescope restarts.
+
+#### Display and colour
 
 - A single slow display query no longer drops the plugin into **Plugin not
   ready** for a moment, and can no longer leave a false "another plugin"
   conflict warning behind. Only a real gamescope restart reconnects.
-- An empty settings file no longer keeps the controls paused forever. It can be
-  left by an interrupted first start, or by version 1.0.0 after a power loss,
-  and now loads as defaults. A damaged file with content is still kept intact.
-- The menu tells **Could not load settings** and **Settings not saved** apart
-  from the backend state rather than from the wording of the message.
+- A reconnect that fails with an error is retried instead of leaving the plugin
+  not ready, and a colour table that keeps failing is retried every 16 s rather
+  than rebuilt every 4 s.
+- Waking the device twice in quick succession reapplies your colour settings
+  again; before, the second wake could skip it until the next one. Waking up in
+  a dock no longer sends the built-in screen's settings to the external display
+  for the few seconds before the plugin notices the dock.
+- The "another plugin is driving the same SDR setting" warning now appears only
+  while that plugin is actually writing, fades once it stops, and no longer
+  prevents the plugin from restoring an SDR value gamescope dropped.
+- Switching an effect off restores the right previous value after a lost reply,
+  a brief disconnect, a return from an external display or another tool's
+  colour table. A change whose confirmation was lost is still undone; before,
+  the boost could stay on. After gamescope restarts, the value another tool set
+  on the new session is the one restored.
+- Switching an HDR or SDR look on while the display server is slow to answer
+  no longer forgets another tool's colour table.
+- SDR at 100% writes gamescope's own default, which is neutral on every panel,
+  so it stays neutral even when the panel could not be identified.
+- The panel is judged the way gamescope judges it: an EDID without colour data
+  counts as a standard (Rec.709) panel with D65 white, odd red values are taken
+  as they are, and sessions whose gamescope does not publish its EDID path (it
+  only does when the session sets `GAMESCOPE_PATCHED_EDID_FILE`) read the
+  built-in panel's EDID from the kernel. A standard-gamut panel whose
+  information cannot be read for a moment keeps its own mapping. Each of these used to put a standard screen
+  on the wide-gamut mapping, where every setting is much stronger.
+- Docking is read from the display server that reports it. Lasting errors are
+  logged once rather than on every retry, and in Desktop Mode the plugin no
+  longer logs every X server every few seconds while it waits for gamescope.
 - HDR at 100% no longer briefly shows **building the LUT...** for a table it
   never builds.
 
+#### Menu and updates
+
+- A backend that is slow to answer is shown as **Waiting for backend** (a
+  change) or **Backend unavailable** (a read) instead of a silent spinner, also
+  after the panel was closed and reopened. The **Retry** button is gone: the
+  open panel already asks again every second, so it never did anything extra.
+- Updates: a successful download clears the error of an earlier failed attempt,
+  and checking again - or a check that fails - keeps a finished download of the
+  same release. The result fields can be reached with the gamepad, and the
+  section keeps its focus when the plugin becomes ready or loses its display.
+- Install and update instructions match Decky: turn on Developer mode, choose
+  **Browse** next to **Install Plugin from ZIP File**, accept Decky's warning
+  and confirm. That replaces the installed version itself; there is no need to
+  uninstall first, and settings are always kept.
+- Clearer wording for what to do when a setting cannot be applied and for the
+  SDR and HDR slider descriptions.
+
 ### Internal
 
-- The SDR and HDR colour tables share one code path, and EDID parsing lives in
-  `vibrance_edid.py`.
-- Tests are grouped by topic instead of by audit round, and every suite also
-  passes on its own.
-- Audit reports moved to the `1.1.1` tag; [docs/AUDITS.md](docs/AUDITS.md) links them.
+- The menu tells **Could not load settings** and **Settings not saved** apart
+  from the backend state rather than from the wording of the message.
+- The SDR and HDR colour tables share one code path. `main.py` is split by job
+  and keeps the controls, scheduling, monitoring and connecting: what goes onto
+  gamescope (`vibrance_effects.py`), reading the panel (`vibrance_panel.py`),
+  EDID parsing, gamescope's X11 atoms, LUT files, the settings file and host
+  checks each live in their own `vibrance_*.py` module, and everything that
+  lived on the `Plugin` class is one `PluginState` object (`vibrance_state.py`). The panel's request
+  queue (`stateSync.ts`) exposes only what the panel uses. The panel tests
+  share one Decky stand-in, `tests/panel-harness.mjs`.
+- Tests are grouped by topic instead of by audit round, and every test passes
+  on its own and in any order.
+- Audit reports moved to the `1.1.1` tag; [docs/AUDITS.md](docs/AUDITS.md)
+  links them.
+- The shared updater validates and hands over downloads through the open file,
+  never a path the user could swap, which matters for root-run sibling plugins.
+- CI uses actions pinned by commit (they run on Node 24; the build uses Node
+  22), tests the backend on Python 3.10, 3.11 and 3.13, and checks that a
+  release tag matches `plugin.json` and the newest CHANGELOG heading.
+  `verify:package` refuses uncommitted changes in shipped files, a bundled
+  `@decky/api` that differs from the lockfile, and a frontend built from older
+  sources than the checkout. Source maps get `decky://` paths on Windows too.
+- README documents the release steps and that on a few devices with their own
+  gamescope display script the steps above 100% may map differently.
+
+### Quality checks
+
+- Checked on Legion Go 2 with SteamOS (wide gamut, HDR) and Odin 3 with Armada
+  (standard gamut with HDR, Decky running through FEX) through the backend
+  calls the menu makes, reading back what reached gamescope: both sliders and
+  their colour tables, gamescope dropping a value, another plugin writing the
+  same setting, **Back to defaults**, the settings file, the update check,
+  restarting Decky, switching to Desktop Mode and back, and sleep/wake. No
+  warnings or errors were logged. Docking, physical gamepad input, colour
+  measurement and HDR game output were not part of this pass.
 
 ## [1.1.1] - 2026-10-11
 

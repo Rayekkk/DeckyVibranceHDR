@@ -1,7 +1,6 @@
 # Audit and validation history
 
-The full audit and device reports written while preparing versions 1.0.3 to
-1.1.1 are kept at the [`1.1.1` tag](https://github.com/Rayekkk/DeckyVibranceHDR/tree/1.1.1/docs)
+The full audit and device reports written up to the 1.1.1 release are kept at the [`1.1.1` tag](https://github.com/Rayekkk/DeckyVibranceHDR/tree/1.1.1/docs)
 rather than on `main`. They record the state of the code at that time; versions,
 hashes and timings in them are historical. The fixes they describe are covered
 by the test suites in [`tests/`](../tests) and summarised in [CHANGELOG.md](../CHANGELOG.md).
@@ -27,7 +26,7 @@ by the test suites in [`tests/`](../tests) and summarised in [CHANGELOG.md](../C
 | [Round 4](https://github.com/Rayekkk/DeckyVibranceHDR/blob/1.1.1/docs/FULL_AUDIT_ROUND4_2026-10-10.md) | Redundant work, concurrent update checks (in Polish) |
 | [Round 3](https://github.com/Rayekkk/DeckyVibranceHDR/blob/1.1.1/docs/FULL_AUDIT_ROUND3_2026-10-10.md) | Bounded controls, monitor latency, update metadata (in Polish) |
 | [Second full audit](https://github.com/Rayekkk/DeckyVibranceHDR/blob/1.1.1/docs/FULL_AUDIT_2026-10-10.md) | Display changes, slow HTTP, release validation (in Polish) |
-| [1.0.3 repair report](https://github.com/Rayekkk/DeckyVibranceHDR/blob/1.1.1/docs/REPAIR_REPORT.md) | The 14 findings of the first audit (in Polish) |
+| [First repair report](https://github.com/Rayekkk/DeckyVibranceHDR/blob/1.1.1/docs/REPAIR_REPORT.md) | The 14 findings of the first audit, for a 1.0.3 that was never tagged (in Polish) |
 
 ## What automated checks cannot replace
 
