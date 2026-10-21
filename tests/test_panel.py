@@ -187,6 +187,16 @@ class Edid(PluginTest):
         for blob in (short_end, short_metadata):
             self.assertIsNone(M.vibrance_edid.supports_pq(_harness.valid_edid(blob)))
 
+    def test_a_new_white_point_alone_counts_as_a_change(self):
+        """The SDR look is built for the panel's white, so it has to be rebuilt."""
+        def edid(x, y):
+            blob = bytearray(edid_with_red(0.640, 0.330))
+            blob[0x21], blob[0x22] = x >> 2, y >> 2
+            blob[0x1A] = ((x & 3) << 2) | (y & 3)
+            return _harness.valid_edid(blob)
+        M.Plugin._configure_for_panel((None, ("edid", "/edid/a", None), edid(303, 314)))
+        self.assertTrue(M.Plugin._configure_for_panel((None, ("edid", "/edid/b", None), edid(320, 336))))
+
     def test_configuring_takes_the_white_point_from_the_edid(self):
         blob = bytearray(edid_with_red(0.640, 0.330))
         x, y = 303, 314
@@ -763,3 +773,165 @@ class KernelEdidHdr(PluginCase):
         # Without the fallback (blob None) both stayed True.
         self.assertTrue(M.Plugin._state["hdr_supported"], "HDR half hidden")
         self.assertTrue(M.Plugin._state["hdr_enabled"], "saved HDR toggle switched off")
+
+
+def kernel_panel(drm, name, edid):
+    os.mkdir(os.path.join(drm, name))
+    Path(drm, name, "status").write_text("connected\n")
+    Path(drm, name, "edid").write_bytes(edid)
+
+
+class KernelEdidFallback(PluginTest):
+    """Kills CP6, H10, CP5."""
+
+    def test_the_kernel_fallback_runs_when_gamescope_says_internal(self):
+        """IS_EXTERNAL = 0 and no EDID path is the usual unpatched session."""
+        panel = edid_with_red(0.640, 0.330)
+        with tempfile.TemporaryDirectory() as drm, patch.object(M.vibrance_host, "DRM_SYSFS", drm):
+            kernel_panel(drm, "card0-eDP-1", panel)
+            self.assertEqual(M.Plugin._probe_panel((False, None))[2], panel)
+
+    def test_the_kernel_fallback_takes_an_lvds_panel(self):
+        """gamescope counts LVDS as internal too (DRMBackend.cpp GetScreenType)."""
+        panel = edid_with_red(0.640, 0.330)
+        with tempfile.TemporaryDirectory() as drm, patch.object(M.vibrance_host, "DRM_SYSFS", drm):
+            kernel_panel(drm, "card0-LVDS-1", panel)
+            self.assertEqual(M.vibrance_host.builtin_panel_edid_path(),
+                             os.path.join(drm, "card0-LVDS-1", "edid"))
+
+    def test_a_valid_kernel_edid_without_hdr_is_read_once(self):
+        """Its HDR answer is unknown, but re-reading the same bytes cannot change it."""
+        with tempfile.TemporaryDirectory() as drm, patch.object(M.vibrance_host, "DRM_SYSFS", drm), \
+                patch.object(M.Plugin, "_panel_cache_key", None), \
+                patch.object(M.Plugin, "_panel_cache_complete", False):
+            kernel_panel(drm, "card0-eDP-1", edid_with_red(0.640, 0.330))
+            with patch.object(M.vibrance_host, "read_edid", wraps=M.vibrance_host.read_edid) as reader:
+                for _ in range(3):
+                    M.Plugin._configure_for_panel(M.Plugin._probe_panel((False, None)))
+            self.assertEqual(reader.call_count, 1)
+
+
+class KernelHdrAnswer(PluginTest):
+    """test_panel.py, next to KernelEdidHdr. Kills CP2."""
+
+    def test_a_kernel_edid_that_advertises_pq_is_believed(self):
+        M.Plugin._state["hdr_supported"] = False
+        with tempfile.TemporaryDirectory() as drm, patch.object(M.vibrance_host, "DRM_SYSFS", drm), \
+                patch.object(M.Plugin, "_panel_cache_key", None), \
+                patch.object(M.Plugin, "_panel_cache_complete", False):
+            kernel_panel(drm, "card0-eDP-1", edid_cta(4))
+            M.Plugin._configure_for_panel(M.Plugin._probe_panel((False, None)))
+        self.assertTrue(M.Plugin._state["hdr_supported"])
+
+
+class PanelShapeChanges(PluginTest):
+    """Kills PS2, CP4."""
+
+    def setUp(self):
+        M.Plugin._panel_cache_key = None
+        M.Plugin._panel_cache_complete = False
+        M.Plugin._use_mapping(True)
+        M.Plugin._sdr_white_point = V.D65
+
+    def test_hdr_support_changing_alone_is_a_panel_change(self):
+        """Startup could not read the EDID; a later read says no PQ on the same
+        gamut. _refresh_panel only re-applies (releasing the HDR look) on change."""
+        M.Plugin._state["hdr_supported"] = True
+        wide_sdr_only = edid_with_red(0.6836, 0.3154)       # base block only: no PQ
+        self.assertTrue(M.Plugin._configure_for_panel(
+            (False, ("external", False, "/edid", (1,)), wide_sdr_only)))
+        self.assertFalse(M.Plugin._state["hdr_supported"])
+
+    def test_an_unreadable_edid_keeps_the_known_white(self):
+        M.Plugin._sdr_white_point = (0.30, 0.32)
+        M.Plugin._configure_for_panel((False, ("external", False, "/edid", (1,)), b"\x00" * 128))
+        self.assertEqual(M.Plugin._sdr_white_point, (0.30, 0.32))
+
+
+def _with_extension(block):
+    base = bytearray(128)
+    base[126] = 1
+    return _harness.valid_edid(base + bytes(block))
+
+
+def _displayid(*blocks, payload=None):
+    ext = bytearray(128)
+    ext[0] = 0x70
+    body = b"".join(blocks)
+    ext[2] = len(body) if payload is None else payload
+    ext[5:5 + len(body)] = body
+    return _with_extension(ext)
+
+
+def _cta(*data_blocks):
+    ext = bytearray(128)
+    ext[:2] = b"\x02\x03"
+    body = b"".join(data_blocks)
+    ext[4:4 + len(body)] = body
+    ext[2] = 4 + len(body)
+    return _with_extension(ext)
+
+
+HDR_PQ = bytes((0xe3, 0x06, 0x05, 0x01))          # extended tag 6, SDR + ST 2084
+
+
+class HdrCapabilityEdges(PluginTest):
+    def test_a_displayid_cta_block_without_pq_is_a_no(self):
+        self.assertIs(M.vibrance_edid.supports_pq(
+            _displayid(bytes((0x81, 0, 4, 0xe3, 0x06, 0x01, 0x01)))), False)
+
+    def test_only_displayid_cta_blocks_are_read_as_cta(self):
+        self.assertIs(M.vibrance_edid.supports_pq(
+            _displayid(bytes((0x22, 0, 4)) + HDR_PQ)), False)
+
+    def test_a_displayid_payload_or_block_past_the_extension_is_not_an_answer(self):
+        self.assertIsNone(M.vibrance_edid.supports_pq(_displayid(payload=123)))
+        self.assertIsNone(M.vibrance_edid.supports_pq(
+            _displayid(bytes((0x81, 0, 9)) + HDR_PQ, payload=7)))
+
+    def test_a_payload_that_fills_the_extension_is_still_read(self):
+        self.assertIs(M.vibrance_edid.supports_pq(_displayid(payload=122)), False)
+
+    def test_an_unknown_extension_is_skipped(self):
+        block = bytearray(128)
+        block[0] = 0xF0                                  # a block map, say
+        self.assertIs(M.vibrance_edid.supports_pq(_with_extension(block)), False)
+
+    def test_only_the_hdr_static_metadata_block_counts(self):
+        colorimetry = bytes((0xe3, 0x05, 0x04, 0x00))    # extended tag 5, sYCC601
+        vendor = bytes((0x63, 0x06, 0x04, 0x00))         # tag 3 whose payload starts 06
+        self.assertIs(M.vibrance_edid.supports_pq(_cta(colorimetry)), False)
+        self.assertIs(M.vibrance_edid.supports_pq(_cta(vendor)), False)
+        self.assertIs(M.vibrance_edid.supports_pq(_cta(colorimetry, HDR_PQ)), True)
+
+    def test_a_short_blob_with_a_valid_header_is_not_valid(self):
+        self.assertFalse(M.vibrance_edid.valid(b"\x00\xff\xff\xff\xff\xff\xff\x00" + bytes(60)))
+
+
+class MissingEdid(PluginTest):
+    def test_a_missing_edid_file_reads_as_nothing(self):
+        self.assertIsNone(M.vibrance_host.read_edid(os.path.join(tempfile.gettempdir(), "no-such-edid-a11")))
+
+
+class PanelTransitionEdges(PluginCase):
+    async def test_docking_gives_the_hdr_look_back(self):
+        M.Plugin._state.update(hdr_enabled=True, hdr_saturation=1.3)
+        self.plugin._schedule_look("hdr")
+        await self.drain()
+        self.assertTrue(self.strings[M.ATOM_LOOK_PQ])
+        self.mock(M.Plugin, "_configure_for_panel", side_effect=lambda *args:
+                  M.Plugin._state.update(external_display=True) or True)
+        await self.plugin._refresh_panel()
+        await self.drain()
+        self.assertEqual(self.strings[M.ATOM_LOOK_PQ], "")
+
+    async def test_an_unchanged_panel_writes_nothing(self):
+        M.Plugin._state.update(sdr_enabled=True, sdr_saturation=1.5, hdr_enabled=True, hdr_saturation=1.3)
+        M.Plugin._panel_cache_key, M.Plugin._panel_cache_complete = None, False
+        probe = (False, ("external", False, "/edid", (1, 2)), edid_with_red(0.68, 0.31))
+        await self.plugin._refresh_panel(probe)
+        await self.drain()
+        floats, strings = self.float_writer.call_count, self.string_writer.call_count
+        await self.plugin._refresh_panel(probe)
+        await self.drain()
+        self.assertEqual((self.float_writer.call_count, self.string_writer.call_count), (floats, strings))

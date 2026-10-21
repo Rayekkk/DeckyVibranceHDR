@@ -21,7 +21,7 @@ import warnings
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from _fixtures import PluginTest  # installs the loader stand-ins first
 import main as M
@@ -602,3 +602,97 @@ class ArchiveRules(PluginTest):
     def test_loader_version_wins_over_plugin_json(self):
         with patch.dict(os.environ, {"DECKY_PLUGIN_VERSION": "7.7.7"}):
             self.assertEqual(M.updater.plugin_version(), "7.7.7")
+
+
+class UpdaterEdges(PluginTest):
+    make = Updater.make
+    archive = Updater.archive
+    attempt = Updater.attempt
+    files = ArchiveRules.files
+    refused = ArchiveRules.refused
+
+    def test_a_release_sized_download_fits_the_default_limit(self):
+        updater = self.make(False)
+        body = b"x" * (3 * 1024 * 1024)
+        with patch.object(updater, "open_url", return_value=io.BytesIO(body)):
+            self.assertEqual(updater.download_to("https://github.com/file", io.BytesIO(), 60), len(body))
+
+    def test_a_finished_download_lets_the_next_one_start(self):
+        updater = self.make(False)
+        with patch.object(updater, "_download", return_value={"success": False, "error": "offline"}):
+            updater.download("https://github.com/a.zip", "a.zip")
+            self.assertEqual(updater.download("https://github.com/a.zip", "a.zip")["error"], "offline")
+
+    def test_an_archive_failing_its_crc_is_refused(self):
+        payload = bytearray(self.archive({**self.files(), "DeckyVibranceHDR/main.py": "# plugin body"}))
+        at = payload.index(b"# plugin body")
+        payload[at] ^= 0x20                     # stored, so the CRC no longer matches
+        self.refused(bytes(payload))
+
+    def test_github_s_own_message_is_shown_when_it_names_no_release(self):
+        updater = self.make()
+        body = {"message": "API rate limit exceeded for 203.0.113.7."}
+        with patch.object(updater, "open_url", return_value=io.BytesIO(json.dumps(body).encode())):
+            self.assertEqual(updater.check()["error"], body["message"])
+
+    def test_zero_and_leading_zero_alphanumerics_are_valid_prereleases(self):
+        self.assertLess(U.version_key("1.0.0-rc.0"), U.version_key("1.0.0"))
+        U.version_key("1.0.0-0a")
+        with self.assertRaises(ValueError):
+            U.version_key("1.0.0-rc.01")
+
+    def test_an_empty_default_trust_store_falls_back_to_a_system_bundle(self):
+        loaded = []
+        ctx = MagicMock()
+        ctx.cert_store_stats.side_effect = lambda: {"x509_ca": len(loaded)}
+        ctx.load_verify_locations.side_effect = lambda cafile: loaded.append(cafile)
+        with tempfile.TemporaryDirectory() as folder:
+            bundle = os.path.join(folder, "ca.pem")
+            Path(bundle).write_text("certificates")
+            with patch.object(U.ssl, "create_default_context", return_value=ctx) as create, \
+                    patch.object(U, "CA_BUNDLES", (os.path.join(folder, "missing.pem"), bundle)):
+                updater = self.make(False)
+                self.assertIs(updater.ssl_context(), ctx)
+                self.assertIs(updater.ssl_context(), ctx)
+        self.assertEqual(loaded, [bundle])
+        create.assert_called_once()
+
+    def test_a_populated_default_trust_store_is_used_as_it_is(self):
+        ctx = MagicMock()
+        ctx.cert_store_stats.return_value = {"x509_ca": 150}
+        with tempfile.TemporaryDirectory() as folder:
+            bundle = os.path.join(folder, "ca.pem")
+            Path(bundle).write_text("certificates")
+            with patch.object(U.ssl, "create_default_context", return_value=ctx) as create, \
+                    patch.object(U, "CA_BUNDLES", (bundle,)):
+                updater = self.make(False)
+                self.assertIs(updater.ssl_context(), ctx)
+                self.assertIs(updater.ssl_context(), ctx)
+        ctx.load_verify_locations.assert_not_called()
+        create.assert_called_once()
+
+    def test_without_any_bundle_verification_stays_on_and_is_not_retried(self):
+        ctx = MagicMock()
+        ctx.cert_store_stats.return_value = {}
+        with patch.object(U.ssl, "create_default_context", return_value=ctx) as create, \
+                    patch.object(U, "CA_BUNDLES", ()), patch.dict("sys.modules", {"certifi": None}):
+            updater = self.make(False)
+            self.assertIs(updater.ssl_context(), ctx)
+            self.assertIs(updater.ssl_context(), ctx)
+        create.assert_called_once()
+
+
+class RealUserEdges(PluginTest):
+    def test_without_decky_user_the_desktop_user_running_the_plugin_is_used(self):
+        me = SimpleNamespace(pw_name="deck", pw_dir="/home/deck", pw_uid=1005, pw_gid=1005)
+        other = SimpleNamespace(pw_name="aaa", pw_dir="/home/aaa", pw_uid=1001, pw_gid=1001)
+        root = SimpleNamespace(pw_name="root", pw_dir="/root", pw_uid=0, pw_gid=0)
+        env = {k: v for k, v in U.os.environ.items() if k != "DECKY_USER"}
+        with patch.dict(U.os.environ, env, clear=True), \
+                patch.object(U.os.path, "isdir", return_value=True), \
+                patch.object(U.pwd, "getpwall", create=True, return_value=[other, me]), \
+                patch.object(U.pwd, "getpwuid", create=True, side_effect=lambda uid: me if uid == 1005 else root):
+            with patch.object(U.os, "getuid", create=True, return_value=1005):
+                self.assertIs(U.real_user(), me)
+            with patch.object(U.os, "getuid", create=True, return_value=0):   # root: lowest desktop uid
+                self.assertIs(U.real_user(), other)

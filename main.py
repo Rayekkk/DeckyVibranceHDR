@@ -158,8 +158,8 @@ DEBOUNCE_S = 0.25
 SDR_COALESCE_S = 0.05
 
 # A look was seen missing after a suspend on a device, though in gamescope's
-# source only a property change (or gamescopectl's set_look) replaces one;
-# reapplying is cheap insurance.
+# source only a property change, gamescopectl's set_look or a gamescope_control
+# set_look/unset_look request replaces one; reapplying is cheap insurance.
 # CLOCK_MONOTONIC stops while the machine is asleep and CLOCK_BOOTTIME does
 # not, so the gap between them is a suspend cycle - no dbus, no root, no
 # Steam client. gamescope is not necessarily ready the moment we notice, and can
@@ -334,6 +334,9 @@ def _sdr_split(value: float):
     return SDR_NEUTRAL_ATOM + on_atom, look
 
 
+_look_errors_logged = {}  # prefix -> build failure last logged
+
+
 def _write_look(saturation: float, slot: int,
                 encoding: str = "pq", prefix: str = "hdr-look",
                 source_white=vibrance_lut.D65, cancelled=lambda: False) -> str:
@@ -348,8 +351,11 @@ def _write_look(saturation: float, slot: int,
     try:
         built = vibrance_lutfile.write(path, saturation, encoding, source_white, cancelled)
     except Exception as e:
-        decky.logger.error(f"{LOG} could not write look: {e}")
+        if _look_errors_logged.get(prefix) != str(e):  # retried every slow tick
+            decky.logger.error(f"{LOG} could not write look: {e}")
+            _look_errors_logged[prefix] = str(e)
         return ""
+    _look_errors_logged.pop(prefix, None)
     return path if built else ""
 
 
@@ -364,10 +370,6 @@ def _own_look_slot(path, prefix: str):
         if candidate == expected:
             return slot
     return None
-
-
-# Default for Plugin._watch_once: read the other X servers there and then.
-_PROBE_NOW = object()
 
 
 # The SDR and HDR looks run through one code path. What differs is the atom,
@@ -606,6 +608,8 @@ class Plugin:
         with vibrance_settings.lock:
             if not Plugin._settings_loaded:
                 raise RuntimeError("settings have not loaded; refusing to overwrite the saved file")
+            if values is not None and Plugin._unloading:
+                return  # an older snapshot; unload's final flush has the newest values
             vibrance_settings.write(settings, values if values is not None else
                                     {key: Plugin._state[key] for key in DEFAULT_SETTINGS})
 
@@ -616,7 +620,9 @@ class Plugin:
             Plugin._save(values)
             return ""
         except (OSError, ValueError, TypeError, RuntimeError) as exc:
-            message = f"could not save settings: {exc}"
+            # Not the OSError's filename: mkstemp names a random temporary each try.
+            reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else exc
+            message = f"could not save settings: {reason}"
             if message != Plugin._state["settings_error"]:  # retried on every panel tick
                 decky.logger.error(f"{LOG} settings save failed: {exc}")
             return message
@@ -698,6 +704,10 @@ class Plugin:
         if (Plugin._unloading or not Plugin._state["sdr_enabled"]
                 or Plugin._disconnected
                 or Plugin._state["external_display"]):
+            return
+        if not Plugin._can_restore_session():
+            # A replaced gamescope is adopted (its own value read) before we write to it.
+            Plugin._set_error("sdr", "waiting for gamescope before applying SDR")
             return
         # The slider speaks in "1.0 is neutral"; the atom's neutral moves with
         # the branch, so the offset from neutral is what actually carries over.
@@ -855,6 +865,10 @@ class Plugin:
     def _commit_look(component, path, slot, value) -> None:
         """Point gamescope at a finished LUT and record the outcome."""
         look = _LOOKS[component]
+        if not Plugin._can_restore_session():
+            # As for SDR: a replaced gamescope's own look is read before we write.
+            Plugin._set_error(look["error"], f"waiting for gamescope before applying the {look['label']} look")
+            return
         # A foreign writer may have changed while we built, even when this
         # replaces an already owned LUT.
         Plugin._capture_look_baseline(component, vibrance_x11.read_string_atom(look["atom"]))
@@ -974,6 +988,9 @@ class Plugin:
             # A failed clear retains ownership for retry, not permission to
             # revive the old nonneutral look after resume or a dropped atom.
             Plugin._release_look(component)
+            return
+        if not Plugin._can_restore_session():
+            Plugin._set_error(look["error"], f"waiting for gamescope before applying the {look['label']} look")
             return
         if not vibrance_x11.write_string_atom(look["atom"], path):
             Plugin._set_error(look["error"],
@@ -1203,14 +1220,12 @@ class Plugin:
         quiet looks. The first reading is a reference only: it may be our own
         write from before a reconnect moved us.
         """
-        if slow_tick:
-            seen = vibrance_x11.foreign_sdr_values() if foreign is _PROBE_NOW else foreign
-            if seen is not None:
-                changed = (bool(seen) and Plugin._foreign_sdr_seen is not None
-                           and seen != Plugin._foreign_sdr_seen)
-                Plugin._foreign_active_ticks = (
-                    CONFLICT_STRIKES if changed else max(0, Plugin._foreign_active_ticks - 1))
-                Plugin._foreign_sdr_seen = seen
+        if slow_tick and foreign is not None:
+            changed = (bool(foreign) and Plugin._foreign_sdr_seen is not None
+                       and foreign != Plugin._foreign_sdr_seen)
+            Plugin._foreign_active_ticks = (
+                CONFLICT_STRIKES if changed else max(0, Plugin._foreign_active_ticks - 1))
+            Plugin._foreign_sdr_seen = foreign
         if not Plugin._foreign_active_ticks:
             return ""
         return ("another plugin is driving the same SDR setting from a different X "
@@ -1218,7 +1233,7 @@ class Plugin:
                 "one wins, so keep only one enabled")
 
     @staticmethod
-    def _watch_once(foreign=_PROBE_NOW) -> None:
+    def _watch_once(foreign) -> None:
         """Put our value back when something drops it, and only call it a
         conflict once that keeps happening.
 
@@ -1228,7 +1243,7 @@ class Plugin:
         the strike count is there to tell apart.
 
         *foreign* is a reading of the other X servers taken outside the lock
-        (None when there is none this tick); by default it is read here.
+        (None when there is none this tick).
         """
         # Look health is independent of the SDR atom. In particular, an HDR-only
         # configuration still needs its slow readback check, and a failed clear
@@ -1239,7 +1254,8 @@ class Plugin:
             Plugin._slow_checks = 0
             if not Plugin._state["sdr_enabled"]:
                 Plugin._release_sdr()
-            if not Plugin._state["hdr_enabled"]:
+            # Also once the panel no longer advertises PQ: the toggle is hidden then.
+            if not Plugin._look_enabled("hdr"):
                 Plugin._release_look("hdr")
             Plugin._reassert_looks_if_dropped()
 

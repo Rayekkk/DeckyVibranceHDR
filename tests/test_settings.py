@@ -242,7 +242,8 @@ class ReadFailure(PluginCase):
                     store = SimpleNamespace(path=str(path), settings={"sdr_enabled": True})
                     store.getSetting = lambda key, default: store.settings.get(key, default)
                     self.mock(M, "settings", store)
-                    await self.plugin._main()
+                    # Bounded: a regression that never reads defaults would loop forever.
+                    await asyncio.wait_for(self.plugin._main(), 5)
                     self.assertTrue(M.Plugin._state["settings_loaded"])
                     self.assertFalse(M.Plugin._state["sdr_enabled"])
                     self.assertEqual(M.Plugin._state["settings_error"], "")
@@ -603,3 +604,98 @@ class StartupRecovery(PluginCase):
         await asyncio.gather(*M.Plugin._tasks)
         saved = M.Plugin._save.call_args.args[0]
         self.assertEqual(saved["sdr_saturation"], M.SDR_MAX_WIDE)
+
+
+class StaleSnapshotAfterFinalFlush(PluginCase):
+    """B1: a debounced snapshot whose executor job reaches the writer lock only
+    after unload's final flush overwrites the newer values on disk."""
+
+    async def test_an_older_snapshot_landing_after_unload_does_not_win(self):
+        started, release, finished = threading.Event(), threading.Event(), threading.Event()
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            path.write_text("{}", encoding="utf-8")
+            self.mock(M, "settings", SimpleNamespace(path=str(path), settings={}))
+            self.mock(M.os.path, "exists", side_effect=PATH_EXISTS)
+
+            def save(values=None):
+                if values is not None:      # the debounced job, preempted before the writer lock
+                    started.set()
+                    release.wait(2)
+                try:
+                    SAVE_SETTINGS(values)
+                finally:
+                    if values is not None:
+                        finished.set()
+            self.mock(M.Plugin, "_save", side_effect=save)
+
+            await self.plugin.set_hdr_saturation(1.2)
+            self.assertTrue(await asyncio.to_thread(started.wait, 1))
+            await self.plugin.set_hdr_saturation(1.4)
+            await self.plugin._unload()     # the final flush writes 1.4
+            release.set()                   # the orphaned older job now gets the lock
+            self.assertTrue(await asyncio.to_thread(finished.wait, 2))
+            saved = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(saved["hdr_saturation"], 1.4)
+
+
+class SettingsNewFlag(PluginTest):
+    """Kills S1, S8."""
+
+    def test_a_settings_file_that_cannot_be_checked_is_not_new(self):
+        with patch.object(M.vibrance_settings.os, "stat", side_effect=PermissionError(13, "denied")):
+            M.vibrance_settings.note_existing("/somewhere/settings.json")
+        self.assertFalse(M.vibrance_settings.new)
+
+    def test_a_file_that_loaded_once_is_retried_when_it_goes_missing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "settings.json")
+            Path(path).write_text("{}")
+            manager = SimpleNamespace(path=path, settings={})
+            M.vibrance_settings.new = True                  # first install
+            M.vibrance_settings.read(manager)
+            os.unlink(path)                                 # card unmounted, say
+            with self.assertRaises(FileNotFoundError):
+                M.vibrance_settings.read(manager)
+
+
+class SettingsNewFlagFiles(PluginTest):
+    def test_note_existing_reads_the_real_file_system(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "settings.json")
+            M.vibrance_settings.note_existing(path)
+            self.assertIs(M.vibrance_settings.new, True)
+            with open(path, "w") as f:
+                f.write("{}")
+            M.vibrance_settings.note_existing(path)
+            self.assertIs(M.vibrance_settings.new, False)
+
+    def test_a_folder_that_cannot_take_the_temporary_file_is_an_os_error(self):
+        manager = SimpleNamespace(path=os.path.join(tempfile.gettempdir(), "no-such-dir-a11", "settings.json"),
+                                  settings={})
+        with self.assertRaises(OSError):
+            M.vibrance_settings.write(manager, {"sdr_enabled": True})
+
+
+class SaveFailureLogging(PluginTest):
+    """A settings folder that cannot take a new file (read-only remount, removed
+    folder) fails inside tempfile.mkstemp, whose OSError names a fresh random
+    settings-XXXX path every time. The panel tick retries every 5 s, so the
+    "log once" comparison never matches: a line every 5 s and a reason that
+    changes under the user.
+    """
+
+    def test_a_lasting_save_failure_with_a_random_temp_name_is_logged_once(self):
+        with tempfile.TemporaryDirectory() as folder:
+            manager = SimpleNamespace(path=os.path.join(folder, "gone", "settings.json"), settings={})
+            with patch.object(M, "settings", manager), \
+                    patch.object(M.Plugin, "_settings_loaded", True), \
+                    patch.object(M.Plugin, "_save", SAVE_SETTINGS), \
+                    patch.object(M.decky.logger, "error") as error:
+                messages = []
+                for _ in range(3):                    # three panel-tick retries
+                    message = M.Plugin._write_settings()
+                    M.Plugin._state["settings_error"] = message
+                    messages.append(message)
+            self.assertEqual(error.call_count, 1, [c.args[0] for c in error.call_args_list])
+            self.assertEqual(len(set(messages)), 1, messages)

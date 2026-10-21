@@ -121,7 +121,11 @@ def supports_pq(blob: bytes):
     checksum or malformed inside an extension. A complete EDID that never
     mentions PQ is a definite no for that EDID. gamescope's patched copy is
     where a display script's HDR gets added; the kernel's own EDID of such a
-    panel never says it, which the caller allows for.
+    panel never says it, which the caller allows for. gamescope itself also
+    wants BT.2020 colorimetry before it turns HDR on from an EDID; that is not
+    required here: display scripts can force HDR on whatever the EDID says
+    (Legion Go 2, ROG Ally X), and a visible control that does nothing is the
+    safer mistake.
     """
     if not valid(blob):
         return None

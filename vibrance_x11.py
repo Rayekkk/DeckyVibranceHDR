@@ -39,6 +39,8 @@ DISPLAY = ":0"          # both replaced by pick_display()
 DISPLAYS = FALLBACK
 # Seconds one xprop may take; the plugin shortens it while unloading.
 timeout = 3.0
+# Scans in a row that found gamescope but could not read every server.
+_deferred = 0
 
 
 def system_env(**extra) -> dict:
@@ -198,20 +200,29 @@ def pick_display():
     wins; between the rest, the fuller surface does. Returns the server (or
     None) and what each one showed, for the log.
     """
-    global DISPLAY, DISPLAYS
+    global DISPLAY, DISPLAYS, _deferred
     DISPLAYS = display_candidates()
     best, best_rank = None, (False, 0)
     seen = []
+    unanswered = False
     for candidate in DISPLAYS:
-        lines = (read_root_properties(candidate) or "").splitlines()
+        out = read_root_properties(candidate)
+        unanswered |= out is None
+        lines = (out or "").splitlines()
         count = sum(1 for line in lines if line.startswith("GAMESCOPE"))
         root = any(line.startswith(ATOM_IS_EXTERNAL + "(") for line in lines)
         seen.append(f"{candidate}: {count} gamescope atoms" + (", docking state" if root else ""))
         if count and (root, count) > best_rank:
             best, best_rank = candidate, (root, count)
-    if best is not None:
-        DISPLAY = best
-    return best, "; ".join(seen)
+    scan = "; ".join(seen)
+    # A server that timed out may be the one carrying the docking state; ask
+    # again rather than settle for the rest. A server that never answers (a
+    # hung desktop session) cannot hold gamescope back for long.
+    if best is not None and (best_rank[0] or not unanswered or _deferred >= 3):
+        DISPLAY, _deferred = best, 0
+        return best, scan
+    _deferred = _deferred + 1 if best is not None else 0  # in a row only
+    return None, scan
 
 
 def foreign_sdr_values():

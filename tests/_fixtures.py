@@ -23,6 +23,8 @@ import main as M  # noqa: E402
 
 # Never the machine's own panel: a laptop running the suite has an eDP EDID.
 M.vibrance_host.DRM_SYSFS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-such-drm")
+# Nor its X servers: a desktop session's sockets would answer real xprop calls.
+M.vibrance_x11.SOCKET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-such-x11")
 
 # Unpatched originals, captured at import before any test replaces them.
 READ_STRING_ATOM = M.vibrance_x11.read_string_atom
@@ -102,7 +104,7 @@ class StateGuard:
     def run(self, result=None):
         saved = [_snapshot(M.Plugin), _snapshot(M), _snapshot(M.vibrance_lutfile),
                  _snapshot(M.vibrance_x11), _snapshot(M.vibrance_host),
-                 _snapshot(M.vibrance_settings)]
+                 _snapshot(M.vibrance_settings), _snapshot(M.updater)]
         try:
             return super().run(result)
         finally:

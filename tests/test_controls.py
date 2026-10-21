@@ -5,11 +5,13 @@
 """RPC inputs, applying SDR/HDR, look ownership and worker coalescing."""
 
 import asyncio
+import math
 import os
 import re
 import subprocess
 import tempfile
 import threading
+import time
 from collections import OrderedDict
 from pathlib import Path
 from unittest.mock import patch
@@ -1040,3 +1042,275 @@ class SdrRewrite(PluginCase):
         await self.plugin.set_sdr_saturation(1.5)
         await self.drain()
         self.assertEqual(self.live_sdr, 1.5)
+
+
+class LookReleaseGaps(PluginCase):
+    """T1: two lines in the look ownership code that no existing test fails without."""
+
+    async def test_a_look_that_replaced_ours_is_restored_after_we_go_off_and_on(self):
+        # _release_look's "somebody else replaced us" branch must keep their look
+        # as the baseline; later reads can fail and never learn it again.
+        other = "/opt/other/look.cube"
+        M.Plugin._state.update(hdr_enabled=True, hdr_saturation=1.3, hdr_applied=True,
+                               hdr_applied_saturation=1.3)
+        M.Plugin._hdr_look_path = "/tmp/hdr-look-0.cube"
+        self.strings[M.ATOM_LOOK_PQ] = other
+        await self.plugin.set_hdr_enabled(False)
+        self.assertEqual(self.strings[M.ATOM_LOOK_PQ], other)
+        M.vibrance_x11.read_string_atom.side_effect = lambda atom: None   # reads now fail
+        await self.plugin.set_hdr_enabled(True)
+        await self.drain()
+        self.assertTrue(self.strings[M.ATOM_LOOK_PQ].startswith("/tmp/hdr-look-"))
+        M.vibrance_x11.read_string_atom.side_effect = lambda atom: self.strings.get(atom)
+        await self.plugin.set_hdr_enabled(False)
+        self.assertEqual(self.strings[M.ATOM_LOOK_PQ], other)
+
+    async def test_our_own_live_slot_is_claimed_so_a_failed_build_still_clears_it(self):
+        M.Plugin._state.update(hdr_enabled=True, hdr_saturation=1.3)
+        self.strings[M.ATOM_LOOK_PQ] = "/tmp/hdr-look-1.cube"    # ours, unowned in memory
+        self.builder.side_effect = lambda *_args: ""             # the build fails
+        self.plugin._schedule_look("hdr")
+        await self.drain()
+        self.assertEqual(M.Plugin._look_slot, 1)
+        await self.plugin.set_hdr_enabled(False)
+        self.assertFalse(self.strings.get(M.ATOM_LOOK_PQ))
+
+
+class LookCommit(PluginCase):
+    """Kills CM2, CM6."""
+
+    async def test_look_failures_count_a_failed_write_and_reset_on_success(self):
+        self.string_writer.side_effect = lambda *_args: False
+        M.Plugin._commit_look("hdr", "/tmp/hdr-look-1.cube", 1, 1.2)
+        self.assertEqual(M.Plugin._look_failures["hdr"], 1)
+        self.string_writer.side_effect = self.write_string
+        M.Plugin._commit_look("hdr", "/tmp/hdr-look-0.cube", 0, 1.2)
+        self.assertEqual(M.Plugin._look_failures["hdr"], 0)
+
+
+class HdrLookStuckAfterPanelLosesPq(PluginCase):
+    async def test_a_failed_release_when_the_hdr_half_goes_away_is_retried(self):
+        """The panel stops advertising PQ while an HDR look is applied (an EDID
+        that only became readable later, say). _apply_both releases the look
+        once; if that write fails nothing retries it - the slow tick only
+        retries while hdr_enabled is False, _retry_pending_looks and the
+        reassert skip a half that is not _look_enabled, and the panel cache is
+        complete - and the frontend hides the HDR toggle, so the saturated
+        look stays on screen until Reset or reload.
+        """
+        path = "/tmp/hdr-look-0.cube"
+        M.Plugin._hdr_look_path = path
+        self.strings[M.ATOM_LOOK_PQ] = path
+        M.Plugin._state.update(hdr_enabled=True, hdr_applied=True,
+                               hdr_applied_saturation=1.3, hdr_saturation=1.3)
+
+        def lose_pq(*_):
+            M.Plugin._state["hdr_supported"] = False
+            return True
+        self.mock(M.Plugin, "_configure_for_panel", side_effect=lose_pq)
+        writes = iter([False])                        # one transient failure
+        self.string_writer.side_effect = lambda atom, value: (
+            next(writes, True) and self.write_string(atom, value))
+        await self.plugin._refresh_panel(probe=(False, ("edid", "p", 1), None))
+        self.assertEqual(self.strings[M.ATOM_LOOK_PQ], path)   # first try failed
+
+        for _ in range(2 * M.SLOW_CHECK_EVERY):     # half a minute of watch ticks
+            await self.plugin._watch_tick()
+        await self.drain()
+        self.assertIn(self.strings.get(M.ATOM_LOOK_PQ), (None, ""),
+                      "HDR look never released")
+
+
+class LookBuildFailureLogging(PluginCase):
+    async def test_a_lasting_build_failure_is_logged_once_not_every_retry(self):
+        """A runtime folder that cannot be written (full or read-only storage)
+        fails every build. The retry runs on each slow tick (~16 s) and every
+        attempt logs "could not write look" - about 225 lines an hour - while
+        settings saves and the monitor already log a lasting failure once.
+        """
+        self.builder.side_effect = WRITE_LOOK         # the real one
+        self.mock(M.vibrance_lutfile, "write", side_effect=OSError(28, "No space left on device"))
+        error = self.mock(M.decky.logger, "error")
+        M.Plugin._state.update(hdr_enabled=True, hdr_saturation=1.3)
+        for _ in range(3):
+            self.plugin._schedule_look("hdr")
+            await self.drain()
+        logged = [c.args[0] for c in error.call_args_list if "could not write look" in c.args[0]]
+        self.assertEqual(len(logged), 1, logged)
+        self.assertIn("could not build", M.Plugin._state["hdr_error"])
+
+
+class RpcSurface(PluginCase):
+    """The frontend's own reads; every other suite reads Plugin._state directly."""
+
+    async def test_reads_answer_with_a_copy_of_the_state_the_version_and_the_download(self):
+        state = await self.plugin.get_state()
+        self.assertEqual(state, M.Plugin._state)
+        self.assertIsNot(state, M.Plugin._state)
+        with patch.object(M.updater, "plugin_version", return_value="9.9.9"):
+            self.assertEqual(await self.plugin.get_version(), {"version": "9.9.9"})
+        result = {"success": True, "path": "/home/deck/Downloads/x.zip"}
+        with patch.object(M.updater, "download", return_value=result) as download:
+            self.assertEqual(await self.plugin.perform_update("https://github.com/x.zip", "x.zip"), result)
+        download.assert_called_once_with("https://github.com/x.zip", "x.zip")
+
+
+class ToggleArguments(PluginCase):
+    async def test_switches_take_only_booleans_and_clamp_the_carried_value(self):
+        for setter in (self.plugin.set_sdr_enabled, self.plugin.set_hdr_enabled):
+            with self.assertRaises(ValueError):
+                await setter("false")
+            with self.assertRaises(ValueError):
+                await setter(True, math.nan)
+        await self.plugin.set_sdr_enabled(True, 99.0)
+        self.assertEqual(M.Plugin._state["sdr_saturation"], M.Plugin._state["sdr_max"])
+        await self.plugin.set_hdr_enabled(True, 99.0)
+        self.assertEqual(M.Plugin._state["hdr_saturation"], M.HDR_MAX)
+
+
+class UntouchedAtom(PluginCase):
+    async def test_releasing_sdr_that_was_never_applied_writes_nothing(self):
+        """The slow tick releases a disabled SDR half every time; an atom we
+        never wrote belongs to gamescope or another tool."""
+        M.Plugin._state["sdr_enabled"] = False
+        self.assertTrue(M.Plugin._release_sdr())
+        self.float_writer.assert_not_called()
+
+
+class Debounce(PluginCase):
+    """PluginCase sets DEBOUNCE_S and SDR_COALESCE_S to 0, so nothing else waits."""
+
+    async def test_a_worker_waits_until_its_due_time(self):
+        M.Plugin._due["probe"] = time.monotonic() + 0.1
+        started = time.monotonic()
+        await self.plugin._debounce("probe")
+        self.assertGreaterEqual(time.monotonic() - started, 0.09)
+
+
+class TaskBookkeeping(PluginCase):
+    async def test_finished_workers_leave_the_task_list(self):
+        await self.plugin.set_hdr_saturation(1.3)
+        await self.drain()
+        await asyncio.sleep(0)
+        self.assertEqual(M.Plugin._tasks, [])
+
+
+class BuildingIndicator(PluginCase):
+    async def test_a_new_hdr_value_shows_building_until_the_lut_lands(self):
+        M.Plugin._state["hdr_enabled"] = True
+        await self.plugin.set_hdr_saturation(1.3)
+        self.assertTrue(M.Plugin._state["generating"])
+        await self.drain()
+        self.assertFalse(M.Plugin._state["generating"])
+        await self.plugin.set_hdr_saturation(1.0)          # identity: nothing to build
+        self.assertFalse(M.Plugin._state["generating"])
+
+
+class RuntimeFolder(PluginTest):
+    def test_luts_go_to_decky_s_runtime_folder(self):
+        with tempfile.TemporaryDirectory() as folder:
+            runtime = os.path.join(folder, "data", "DeckyVibranceHDR")
+            with patch.dict(M.os.environ, {"DECKY_PLUGIN_RUNTIME_DIR": runtime}):
+                self.assertEqual(M._runtime_dir(), runtime)
+            self.assertTrue(os.path.isdir(runtime))
+
+
+class RpcReplies(PluginCase):
+    """Every setter's reply is what the frontend renders next (stateSync stores it)."""
+
+    async def test_every_setter_answers_with_the_new_state(self):
+        for call in (lambda: self.plugin.set_sdr_enabled(True), lambda: self.plugin.set_hdr_enabled(True),
+                     lambda: self.plugin.set_sdr_saturation(1.5), lambda: self.plugin.set_hdr_saturation(1.2),
+                     lambda: self.plugin.set_sdr_saturation(1.5), lambda: self.plugin.set_hdr_saturation(1.2),
+                     self.plugin.reset):
+            reply = await call()
+            self.assertEqual(reply, M.Plugin._state)
+        await self.drain()
+
+
+class ResetAndPersistence(PluginCase):
+    async def test_reset_returns_every_control_to_its_default_and_saves_it(self):
+        M.Plugin._state.update(sdr_enabled=True, sdr_saturation=2.0, hdr_enabled=True, hdr_saturation=1.3)
+        await self.plugin.reset()
+        await self.drain()
+        self.assertEqual({k: M.Plugin._state[k] for k in M.DEFAULT_SETTINGS}, M.DEFAULT_SETTINGS)
+        self.assertEqual(M.Plugin._save.call_args.args[0], M.DEFAULT_SETTINGS)
+
+    async def test_switching_hdr_and_moving_sdr_are_saved(self):
+        await self.plugin.set_hdr_enabled(True, 1.2)
+        await self.drain()
+        self.assertTrue(M.Plugin._save.call_args.args[0]["hdr_enabled"])
+        await self.plugin.set_sdr_saturation(1.7)
+        await self.drain()
+        self.assertEqual(M.Plugin._save.call_args.args[0]["sdr_saturation"], 1.7)
+
+
+class SaveWrites(PluginTest):
+    def test_a_debounced_snapshot_reaches_the_disk_while_running(self):
+        M.Plugin._settings_loaded = True
+        M.Plugin._unloading = False
+        with patch.object(M.vibrance_settings, "write") as write:
+            M.Plugin._save({"sdr_enabled": True})
+        write.assert_called_once_with(M.settings, {"sdr_enabled": True})
+
+
+class WorkersDebounce(PluginCase):
+    async def test_a_quick_second_value_replaces_the_first_before_any_build(self):
+        self.mock(M, "DEBOUNCE_S", 0.4)
+        M.Plugin._state["hdr_enabled"] = True
+        await self.plugin.set_hdr_saturation(1.2)
+        await asyncio.sleep(0.02)                      # long enough for an undebounced build
+        await self.plugin.set_hdr_saturation(1.4)
+        await self.drain()
+        self.assertEqual([c.args[0] for c in self.builder.call_args_list], [1.4])
+
+    async def test_a_quick_sdr_drag_writes_the_atom_and_the_file_once(self):
+        self.mock(M, "SDR_COALESCE_S", 0.4)
+        M.Plugin._state["sdr_enabled"] = True
+        await self.plugin.set_sdr_saturation(1.5)
+        await asyncio.sleep(0.02)
+        await self.plugin.set_sdr_saturation(1.7)
+        await self.drain()
+        self.assertEqual([c.args[1] for c in self.float_writer.call_args_list], [M._sdr_split(1.7)[0]])
+        self.assertEqual(M.Plugin._save.call_count, 1)
+
+    async def test_a_disabled_hdr_half_never_shows_building(self):
+        M.Plugin._state["hdr_enabled"] = False
+        await self.plugin.set_hdr_saturation(1.4)
+        self.assertFalse(M.Plugin._state["generating"])
+        await self.drain()
+
+
+class LookFailureLogEdges(PluginCase):
+    async def test_a_failure_that_comes_back_after_a_good_build_is_logged_again(self):
+        self.builder.side_effect = WRITE_LOOK
+        full = OSError(28, "No space left on device")
+        outcomes = iter([full, True, full])
+        def write(*_):
+            outcome = next(outcomes)
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+        self.mock(M.vibrance_lutfile, "write", side_effect=write)
+        error = self.mock(M.decky.logger, "error")
+        M.Plugin._state.update(hdr_enabled=True, hdr_saturation=1.3)
+        for _ in range(3):
+            self.plugin._schedule_look("hdr")
+            await self.drain()
+        logged = [c.args[0] for c in error.call_args_list if "could not write look" in c.args[0]]
+        self.assertEqual(len(logged), 2, logged)
+
+    async def test_each_half_logs_its_own_lasting_failure_once(self):
+        self.builder.side_effect = WRITE_LOOK
+        self.mock(M.vibrance_lutfile, "write",
+                  side_effect=lambda path, *_: (_ for _ in ()).throw(OSError(28, "No space left on device", path)))
+        error = self.mock(M.decky.logger, "error")
+        # 4.0 is past the atom's span (2.0 here), so the SDR half needs a look too.
+        M.Plugin._state.update(hdr_enabled=True, hdr_saturation=1.3, sdr_enabled=True, sdr_saturation=4.0)
+        for _ in range(3):
+            self.plugin._schedule_look("hdr")
+            self.plugin._schedule_look("sdr")
+            await self.drain()
+        logged = [c.args[0] for c in error.call_args_list if "could not write look" in c.args[0]]
+        self.assertEqual(len(logged), 2, logged)
+        self.assertEqual(sum("hdr-look" in line for line in logged), 1, logged)
