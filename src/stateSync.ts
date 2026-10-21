@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: BSD-3-Clause
 // Copyright (c) 2026 Rayekkk
 
+/** Shown while a write has not answered; the backend may still be working. */
+export const WRITE_PENDING = "Backend write is still pending; waiting for its result";
+/** Shown while a read has not answered; Decky replays it, so no second read is sent. */
+export const READ_TIMED_OUT = "Error: Backend read timed out";
+
 /** One write at a time; only the latest unsent value of each slider survives. */
 export function createStateSync<T extends object>(
   read: () => Promise<T>,
-  render: (state: T) => void,
   onError: (error: unknown) => void,
-  connection: (message: string) => void = () => undefined,
   readTimeoutMs = 10000,
   writeNoticeMs = 10000,
 ) {
@@ -19,6 +22,8 @@ export function createStateSync<T extends object>(
   let observed: T | null = null;
   let writing = false;
   let reading: Promise<void> | null = null;
+  // The outstanding read has timed out; what a finished write falls back to.
+  let readTimedOut = false;
   const queue: Job[] = [];
   const edits = new Map<keyof T, { id: number; value: T[keyof T] }>();
   const listeners = new Set<{ render: (state: T) => void; connection: (message: string) => void }>();
@@ -26,7 +31,6 @@ export function createStateSync<T extends object>(
   const reportConnection = (message: string) => {
     connectionMessage = message;
     if (!active) return;
-    connection(message);
     for (const listener of listeners) listener.connection(message);
   };
 
@@ -39,7 +43,6 @@ export function createStateSync<T extends object>(
   const publish = () => {
     const next = snapshot();
     if (!active || !next) return;
-    render(next);
     for (const listener of listeners) listener.render(next);
   };
 
@@ -52,11 +55,15 @@ export function createStateSync<T extends object>(
     // timeout must not release the transport barrier and enqueue more reads.
     const timeout = new Promise<void>(resolve => {
       timer = setTimeout(() => {
-        if (active && started === epoch) reportConnection("Error: Backend read timed out");
+        // Stored even while closed or superseded: this read still blocks every
+        // other one, and a reopened panel must say so rather than spin.
+        readTimedOut = true;
+        reportConnection(READ_TIMED_OUT);
         resolve();
       }, readTimeoutMs);
     });
     const pending = (async () => {
+      let failure: string | null = null;
       try {
         const state = await Promise.resolve().then(() => read());
         if (!active || writing || started !== epoch) return;
@@ -64,10 +71,15 @@ export function createStateSync<T extends object>(
         reportConnection("");
         publish();
       } catch (error) {
-        if (active && started === epoch) reportConnection(String(error));
+        failure = String(error);
       } finally {
         clearTimeout(timer!);
+        // Released before the failure is shown, so the next poll can read.
         reading = null;
+        readTimedOut = false;
+        if (failure !== null && active && started === epoch) reportConnection(failure);
+        // Any answer ends the timeout; one nobody is shown must not leave it behind.
+        else if (connectionMessage === READ_TIMED_OUT) reportConnection("");
         if (active && started !== epoch && !writing) void refresh();
       }
     })();
@@ -90,15 +102,19 @@ export function createStateSync<T extends object>(
         // A slow/lost write reply is visible, but never let another write pass
         // it: the original backend operation may still commit.
         const timer = setTimeout(() => {
-          if (active) reportConnection("Backend write is still pending; waiting for its result");
+          // Stored even while closed, so reopening shows the value is unconfirmed.
+          reportConnection(WRITE_PENDING);
         }, writeNoticeMs);
         try {
           observed = await job.write();
-          reportConnection("");
+          reportConnection(readTimedOut ? READ_TIMED_OUT : "");
         } catch (error) {
           if (active) onError(error);
         } finally {
           clearTimeout(timer);
+          // A failure while closed reports nothing, so the notice must not
+          // outlive the write it was about.
+          if (connectionMessage === WRITE_PENDING) reportConnection(readTimedOut ? READ_TIMED_OUT : "");
           finish(job);
           publish();
         }
@@ -156,7 +172,5 @@ export function createStateSync<T extends object>(
       for (const job of queue.splice(0)) finish(job);
       listeners.clear();
     },
-    activate() { if (!disposed) { active = true; ++epoch; publish(); } },
-    deactivate() { active = false; ++epoch; },
   };
 }

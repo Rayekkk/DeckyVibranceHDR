@@ -1,27 +1,12 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// Copyright (c) 2026 Rayekkk
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { loadPlugin, nodes, settle } from "./panel-harness.mjs";
 
 test("built frontend connects to Decky using host globals and manifest", async () => {
   const manifest = JSON.parse(readFileSync(new URL("../plugin.json", import.meta.url), "utf8"));
-  const source = readFileSync(new URL("../dist/index.js", import.meta.url), "utf8");
-  const connections = [];
-  const states = [], refs = [], effects = [], cleanups = [];
-  let stateIndex = 0, refIndex = 0, effectIndex = 0;
-  globalThis.SP_REACT = {
-    useState(initial) { const i = stateIndex++; if (!(i in states)) states[i] = initial;
-      return [states[i], value => { states[i] = value; }]; },
-    useRef(initial) { const i = refIndex++; return refs[i] ??= { current: initial }; },
-    useCallback(fn) { return fn; },
-    useEffect(fn, deps) { const i = effectIndex++;
-      if (!effects[i] || deps.some((value, n) => effects[i][n] !== value)) {
-        cleanups[i]?.(); effects[i] = deps; cleanups[i] = fn();
-      } },
-  };
-  globalThis.SP_JSX = { jsx: (type, props) => ({ type, props }), jsxs: (type, props) => ({ type, props }) };
-  globalThis.DFL = { staticClasses: { Title: "title" } };
-  for (const name of ["ButtonItem", "Field", "PanelSection", "PanelSectionRow", "SliderField", "Spinner", "ToggleField"])
-    globalThis.DFL[name] = name;
   let backend = { ready: true, sdr_enabled: true, hdr_enabled: true, sdr_saturation: 1,
     hdr_saturation: 1, sdr_applied: true, hdr_applied: false, hdr_applied_saturation: null,
     sdr_error: "", sdr_look_error: "", hdr_error: "", settings_error: "", settings_loaded: true, generating: false,
@@ -30,51 +15,37 @@ test("built frontend connects to Decky using host globals and manifest", async (
   const calls = [], reads = [];
   let releaseCheck, releaseDownload;
   let downloadError = "";
+  let latest = "9.0.0";
+  let checkError = "";
   const checkReply = new Promise(resolve => { releaseCheck = resolve; });
   const downloadReply = new Promise(resolve => { releaseDownload = resolve; });
   let releaseSlider;
   const sliderReply = new Promise(resolve => { releaseSlider = resolve; });
-  globalThis.window = { __DECKY_SECRET_INTERNALS_DO_NOT_USE_OR_YOU_WILL_BE_FIRED_deckyLoaderAPIInit: {
-    connect: (version, name) => {
-      connections.push([version, name]);
-      return { _version: version, callable: route => async (...args) => {
-        if (route === "get_state") {
-          reads.push(JSON.parse(JSON.stringify(args)));
-          if (args.length) throw new Error("get_state expects no arguments");
-          return { ...backend };
-        }
-        calls.push([route, ...args]);
-        if (route === "get_version") return { version: manifest.version };
-        if (route === "check_for_updates") { await checkReply; return {
-          current_version: manifest.version, latest_version: "9.0.0", update_available: true,
-          download_url: "https://github.com/release.zip", asset_name: "release.zip" }; }
-        if (route === "perform_update") { await downloadReply; if (downloadError) throw Error(downloadError); return { success: true, path: "/Downloads/release.zip" }; }
-        if (route === "set_sdr_saturation") { await sliderReply; backend.sdr_saturation = args[0]; }
-        if (route === "set_sdr_enabled") { backend.sdr_enabled = args[0]; backend.sdr_saturation = args[1]; }
-        if (route === "reset") backend = { ...backend, sdr_enabled: false, hdr_enabled: false,
-          sdr_saturation: 1, hdr_saturation: 1 };
-        return { ...backend };
-      }, toaster: { toast() {} }, useQuickAccessVisible: () => true };
-    },
-  } };
+  const { plugin, render, unmount, close, connections, states, cleanups } = await loadPlugin(route => async (...args) => {
+    if (route === "get_state") {
+      reads.push(JSON.parse(JSON.stringify(args)));
+      if (args.length) throw new Error("get_state expects no arguments");
+      return { ...backend };
+    }
+    calls.push([route, ...args]);
+    if (route === "get_version") return { version: manifest.version };
+    if (route === "check_for_updates") { await checkReply;
+      if (checkError) return { current_version: manifest.version, error: checkError };
+      return {
+      current_version: manifest.version, latest_version: latest, update_available: true,
+      download_url: "https://github.com/release.zip", asset_name: `release-${latest}.zip` }; }
+    if (route === "perform_update") { await downloadReply; if (downloadError) throw Error(downloadError); return { success: true, path: `/Downloads/${args[1]}` }; }
+    if (route === "set_sdr_saturation") { await sliderReply; backend.sdr_saturation = args[0]; }
+    if (route === "set_sdr_enabled") { backend.sdr_enabled = args[0]; backend.sdr_saturation = args[1]; }
+    if (route === "reset") backend = { ...backend, sdr_enabled: false, hdr_enabled: false,
+      sdr_saturation: 1, hdr_saturation: 1 };
+    return { ...backend };
+  });
   try {
-    const built = await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);
-    const plugin = built.default();
     assert.deepEqual(connections, [[2, manifest.name]]);
     assert.equal(plugin.name, manifest.name);
     assert.ok(plugin.content);
     assert.ok(plugin.icon);
-    const render = () => {
-      stateIndex = refIndex = effectIndex = 0;
-      return plugin.content.type();
-    };
-    const settle = async () => { for (let i = 0; i < 12; ++i) await Promise.resolve(); };
-    const nodes = tree => {
-      if (!tree) return [];
-      if (Array.isArray(tree)) return tree.flatMap(nodes);
-      if (typeof tree !== "object") return [];
-      return [tree, ...nodes(tree.props?.children)];
-    };
     render(); await settle();
     assert.deepEqual(reads, [[]], "the built panel must call get_state without a Promise callback argument");
     const controls = nodes(render());
@@ -97,6 +68,11 @@ test("built frontend connects to Decky using host globals and manifest", async (
     await toggle.props.onChange(false);
     const blocked = nodes(render()).filter(node => node.type === "Field");
     assert.ok(blocked.some(node => node.props.label === "Could not load settings"));
+    // When the settings failure is also the reason startup waits, it is said once.
+    backend = { ...backend, reason: "could not load settings: EACCES", settings_error: "could not load settings: EACCES" };
+    await toggle.props.onChange(false);
+    const once = nodes(render()).filter(node => node.type === "Field" && node.props.label === "Could not load settings");
+    assert.equal(once.length, 1);
     backend = { ...backend, reason: "could not load settings: lookalike", settings_loaded: true,
       settings_error: "disk full" };
     await toggle.props.onChange(false);
@@ -107,17 +83,15 @@ test("built frontend connects to Decky using host globals and manifest", async (
     await toggle.props.onChange(false);
     const updateComponent = nodes(render()).find(node => typeof node.type === "function" && node.type.name === "UpdateSection");
     assert.ok(updateComponent);
-    for (const cleanup of cleanups) cleanup?.();
-    for (const values of [states, refs, effects, cleanups]) values.length = 0;
-    const renderUpdates = () => { stateIndex = refIndex = effectIndex = 0; return updateComponent.type(); };
+    unmount();
+    const renderUpdates = () => render(updateComponent.type);
     renderUpdates(); await settle();
     const check = nodes(renderUpdates()).find(node => node.props?.children === "Check for updates");
     const checking = check.props.onClick();
     await check.props.onClick();
     assert.equal(calls.filter(call => call[0] === "check_for_updates").length, 1);
     const remountUpdates = async () => {
-      for (const cleanup of cleanups) cleanup?.();
-      for (const values of [states, refs, effects, cleanups]) values.length = 0;
+      unmount();
       renderUpdates(); await settle();
     };
     await remountUpdates();
@@ -141,15 +115,19 @@ test("built frontend connects to Decky using host globals and manifest", async (
     assert.deepEqual(states, beforeUnmountedReply, "an unmounted updater must ignore the download reply");
     await remountUpdates();
     const completed = nodes(renderUpdates()).find(node => node.props?.label === "Downloaded");
-    assert.ok(completed?.props.description.includes("/Downloads/release.zip"),
+    // The Download button that had focus is gone; the result must take it.
+    assert.equal(completed?.props.focusable, true);
+    assert.ok(completed?.props.description.includes("/Downloads/release-9.0.0.zip"),
       "a download that finished with the panel closed must be visible after reopening");
     const oldCallCount = calls.length;
     await check.props.onClick();
     await download.props.onClick();
     assert.equal(calls.length, oldCallCount, "handlers from a closed updater must not start new RPCs");
     const freshCheck = nodes(renderUpdates()).find(node => node.props?.children === "Check for updates");
+    latest = "9.0.1";  // a newer release replaces the finished download's offer
     await freshCheck.props.onClick(); await settle();
-    const retryDownload = nodes(renderUpdates()).find(node => node.props?.children === "Download v9.0.0");
+    assert.ok(!nodes(renderUpdates()).some(node => node.props?.label === "Downloaded"));
+    const retryDownload = nodes(renderUpdates()).find(node => node.props?.children === "Download v9.0.1");
     downloadError = "temporary network error";
     const failedDownload = retryDownload.props.onClick();
     for (const cleanup of cleanups) cleanup?.();
@@ -162,13 +140,30 @@ test("built frontend connects to Decky using host globals and manifest", async (
       "a download failure while closed must remain visible after reopening");
     assert.equal(calls.filter(call => call[0] === "get_version").length, 1,
       "reopening must share its cached installed version");
+    downloadError = "";
+    await nodes(renderUpdates()).find(node => node.props?.children === "Download v9.0.1").props.onClick();
+    await settle();
+    let labels = nodes(renderUpdates()).map(node => node.props?.label);
+    assert.ok(labels.includes("Downloaded"));
+    assert.ok(!labels.includes("Error"), "a successful retry must clear the earlier download error");
+    await nodes(renderUpdates()).find(node => node.props?.children === "Check for updates").props.onClick();
+    await settle();
+    labels = nodes(renderUpdates()).map(node => node.props?.label);
+    assert.ok(labels.includes("Downloaded"), "re-checking the same release keeps its finished download");
+    assert.ok(!nodes(renderUpdates()).some(node => node.props?.children === "Download v9.0.1"));
+    checkError = "API rate limit exceeded";
+    await nodes(renderUpdates()).find(node => node.props?.children === "Check for updates").props.onClick();
+    await settle();
+    labels = nodes(renderUpdates()).map(node => node.props?.label);
+    assert.ok(labels.includes("Error"));
+    assert.ok(labels.includes("Downloaded"), "a failed check offers nothing new and keeps the download");
+    checkError = "";
     const afterDispose = nodes(renderUpdates()).find(node => node.props?.children === "Check for updates");
     plugin.onDismount();
     const disposedCallCount = calls.length;
     await afterDispose.props.onClick();
     assert.equal(calls.length, disposedCallCount);
   } finally {
-    for (const cleanup of cleanups) cleanup?.();
-    for (const key of ["SP_REACT", "SP_JSX", "DFL", "window"]) delete globalThis[key];
+    close();
   }
 });

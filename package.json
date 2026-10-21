@@ -9,8 +9,8 @@
     "watch": "rollup -c -w",
     "typecheck": "tsc --noEmit",
     "package": "npm run build && node scripts/package.mjs",
-    "verify:package": "python scripts/verify_package.py && node --test tests/build-contract.test.mjs",
-    "test": "node --test tests/state-sync.test.mjs tests/package-failure.test.mjs"
+    "verify:package": "python scripts/verify_package.py",
+    "test": "npm run build && node --test \"tests/*.test.mjs\""
   },
   "devDependencies": {
     "@decky/api": "^1.1.3",

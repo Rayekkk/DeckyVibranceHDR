@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Rayekkk
 // https://github.com/Rayekkk/DeckyVibranceHDR
 
-import { callable, definePlugin, toaster, useQuickAccessVisible } from "@decky/api";
+import { callable, definePlugin, toaster } from "@decky/api";
 import {
   ButtonItem,
   Field,
@@ -14,7 +14,7 @@ import {
   ToggleField,
 } from "@decky/ui";
 import { FC, useCallback, useEffect, useRef, useState } from "react";
-import { createStateSync } from "./stateSync";
+import { createStateSync, WRITE_PENDING } from "./stateSync";
 
 interface State {
   ready: boolean;
@@ -30,6 +30,7 @@ interface State {
   sdr_look_error: string;
   hdr_error: string;
   settings_error: string;
+  settings_notice: string;
   settings_loaded: boolean;
   generating: boolean;
   conflict: string;
@@ -70,6 +71,9 @@ const notify = (title: string, body: string) =>
   toaster.toast({ title, body, duration: 5000 });
 
 const pct = (v: number) => `${Math.round(v * 100)}%`;
+// A slow write is a backend still at work, not one that is unreachable.
+const connectionLabel = (message: string) =>
+  message === WRITE_PENDING ? "Waiting for backend" : "Backend unavailable";
 
 // ── Updates ────────────────────────────────────────────────────────────────────
 // Operations and results outlive the QAM component. A reopened panel subscribes
@@ -98,8 +102,14 @@ const readVersion = () => {
 };
 const checkUpdate = async () => {
   if (updatesDisposed || updates.checking || updates.downloading) return;
-  updateSnapshot({ checking: true, info: null, downloadPath: null });
-  try { updateSnapshot({ info: await checkForUpdates() }); }
+  updateSnapshot({ checking: true, info: null });
+  try {
+    const info = await checkForUpdates();
+    // Keep a finished download while it is still the release on offer, and
+    // when the check failed, since a failed check offers nothing new.
+    const same = !!info.asset_name && !!updates.downloadPath?.endsWith(`/${info.asset_name}`);
+    updateSnapshot({ info, downloadPath: same || info.error ? updates.downloadPath : null });
+  }
   catch (e) { updateError("Update check failed", e instanceof Error ? e.message : String(e)); }
   finally { updateSnapshot({ checking: false }); }
 };
@@ -107,7 +117,7 @@ const downloadUpdate = async () => {
   const info = updates.info;
   if (updatesDisposed || updates.checking || updates.downloading
       || !info?.download_url || !info?.asset_name) return;
-  updateSnapshot({ downloading: true });
+  updateSnapshot({ downloading: true, info: { ...info, error: undefined } });
   try {
     const result = await performUpdate(info.download_url, info.asset_name);
     if (result.success && result.path) updateSnapshot({ downloadPath: result.path });
@@ -149,13 +159,13 @@ const UpdateSection: FC = () => {
 
       {info?.error && (
         <PanelSectionRow>
-          <Field label="Error" description={info.error} />
+          <Field label="Error" description={info.error} focusable />
         </PanelSectionRow>
       )}
 
       {info && !info.error && !info.update_available && !downloadPath && (
         <PanelSectionRow>
-          <Field label="Up to date" />
+          <Field label="Up to date" focusable />
         </PanelSectionRow>
       )}
 
@@ -171,10 +181,13 @@ const UpdateSection: FC = () => {
         <PanelSectionRow>
           <Field
             label="Downloaded"
+            focusable
             description={
-              `${downloadPath} - to install: Decky, Developer, uninstall ` +
-              "DeckyVibranceHDR, then Install Plugin from ZIP and pick that file. " +
-              "Your settings are kept."
+              `${downloadPath}. To install it, open Decky's settings, turn on ` +
+              "Developer mode under General, then open Developer, choose Browse next to " +
+              "Install Plugin from ZIP File, Continue on Decky's warning, pick this " +
+              "file and confirm. It replaces this version; your " +
+              "settings are kept."
             }
           />
         </PanelSectionRow>
@@ -192,10 +205,10 @@ const UpdateSection: FC = () => {
 // ── Main content ───────────────────────────────────────────────────────────────
 // QAM content can unmount while an RPC is in flight. Keep one queue across
 // openings so a previous panel cannot send an old edit after the new one.
-const pluginStateSync = createStateSync<State>(getState, () => undefined,
+const pluginStateSync = createStateSync<State>(getState,
   error => notify("Setting failed", String(error)));
+// Decky unmounts it while the Quick Access Menu is closed, which stops the polling.
 const Content: FC = () => {
-  const visible = useQuickAccessVisible();
   const [state, setState] = useState<State | null>(null);
   const [connectionError, setConnectionError] = useState("");
 
@@ -210,11 +223,11 @@ const Content: FC = () => {
     let timer: ReturnType<typeof setTimeout>;
     const poll = async () => {
       await sync.refresh();
-      if (!stopped && visible) timer = setTimeout(poll, 1000);
+      if (!stopped) timer = setTimeout(poll, 1000);
     };
     void poll();
     return () => { stopped = true; clearTimeout(timer); };
-  }, [visible, sync]);
+  }, [sync]);
 
   // Slider moves are applied optimistically so the control stays responsive;
   // the backend is what decides the value that actually lands.
@@ -228,39 +241,46 @@ const Content: FC = () => {
     return (
       <PanelSection>
         <PanelSectionRow>
-          {connectionError ? <Field label="Backend unavailable" description={connectionError} /> : <Spinner />}
+          {connectionError ? <Field label={connectionLabel(connectionError)} description={connectionError} /> : <Spinner />}
         </PanelSectionRow>
-        {connectionError && <PanelSectionRow><ButtonItem onClick={() => void sync.refresh()}>
-          Retry
-        </ButtonItem></PanelSectionRow>}
       </PanelSection>
     );
   }
 
   if (!state.ready) {
+    const settingsLabel = state.settings_loaded ? "Settings not saved" : "Could not load settings";
+    // A settings failure is often also the reason startup waits; say it once,
+    // unless a connection notice takes the top row.
+    const settingsOnTop = !connectionError && !!state.settings_error
+      && state.settings_error === state.reason;
     return (
       <><PanelSection title="Not available">
         <PanelSectionRow>
           <Field
-            label={connectionError ? "Backend unavailable" : "Plugin not ready"}
+            label={connectionError ? connectionLabel(connectionError)
+              : settingsOnTop ? settingsLabel : "Plugin not ready"}
             description={connectionError || state.reason}
           />
         </PanelSectionRow>
-        {state.settings_error && <PanelSectionRow>
-          <Field label={state.settings_loaded ? "Settings not saved" : "Could not load settings"} description={state.settings_error} />
+        {state.settings_error && !settingsOnTop && <PanelSectionRow>
+          <Field label={settingsLabel} description={state.settings_error} />
         </PanelSectionRow>}
-        {connectionError && <PanelSectionRow><ButtonItem onClick={() => void sync.refresh()}>
-          Retry
-        </ButtonItem></PanelSectionRow>}
-      </PanelSection><UpdateSection /></>
+        {state.settings_notice && <PanelSectionRow>
+          <Field label="Settings reset" description={state.settings_notice} />
+        </PanelSectionRow>}
+      </PanelSection><UpdateSection key="updates" /></>
     );
   }
 
   return (
     <>
-      {(connectionError || state.settings_error) && <PanelSection title="Connection and settings">
-        <PanelSectionRow><Field label={connectionError ? "Backend unavailable" : "Settings not saved"}
-          description={connectionError || state.settings_error} /></PanelSectionRow>
+      {(connectionError || state.settings_error || state.settings_notice) && <PanelSection title="Connection and settings">
+        {connectionError && <PanelSectionRow>
+          <Field label={connectionLabel(connectionError)} description={connectionError} /></PanelSectionRow>}
+        {state.settings_error && <PanelSectionRow>
+          <Field label="Settings not saved" description={state.settings_error} /></PanelSectionRow>}
+        {state.settings_notice && <PanelSectionRow>
+          <Field label="Settings reset" description={state.settings_notice} /></PanelSectionRow>}
       </PanelSection>}
       {state.conflict && (
         <PanelSection title="Heads up">
@@ -281,6 +301,13 @@ const Content: FC = () => {
           {state.hdr_error && <PanelSectionRow>
             <Field label="HDR" description={state.hdr_error} />
           </PanelSectionRow>}
+          <PanelSectionRow>
+            <Field label="What happens now" description={"The plugin retries on its own." +
+              // The switches are hidden while docked, and HDR's once the panel drops PQ.
+              (state.external_display || (!state.sdr_error && !state.sdr_look_error && !state.hdr_supported) ? ""
+                : " If this stays, switch the effect off and on again, " +
+                "and check that Game Mode is running.")} />
+          </PanelSectionRow>
         </PanelSection>
       )}
 
@@ -324,8 +351,7 @@ const Content: FC = () => {
                   state.sdr_saturation > state.sdr_soft_limit
                     ? `Past ${pct(state.sdr_soft_limit)} colours start clipping ` +
                       "and detail in saturated areas goes with them."
-                    : "100% is neutral. How much room there is above it " +
-                      "depends on the panel."
+                    : "100% is neutral; higher values make colours more saturated."
                 }
                 value={state.sdr_saturation}
                 min={state.sdr_min}
@@ -378,7 +404,7 @@ const Content: FC = () => {
                   state.hdr_saturation > state.hdr_soft_limit
                     ? `Above ${pct(state.hdr_soft_limit)} channels start clipping ` +
                       "at the edge of the gamut."
-                    : "ICtCp preserves intensity and chroma direction before clipping."
+                    : "Raises colour saturation while keeping brightness, up to the edge of the colour gamut."
                 }
                 value={state.hdr_saturation}
                 min={state.hdr_min}
@@ -424,7 +450,7 @@ const Content: FC = () => {
         </PanelSectionRow>
       </PanelSection>
 
-      <UpdateSection />
+      <UpdateSection key="updates" />
     </>
   );
 };
