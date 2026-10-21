@@ -7,16 +7,15 @@
 import os
 import socket
 import tempfile
-import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import _fixtures  # noqa: F401  installs the loader stand-ins first
+from _fixtures import PluginTest  # installs the loader stand-ins first
 import main as M
 
 
-class AtomEncoding(unittest.TestCase):
+class AtomEncoding(PluginTest):
 
     def test_float_round_trip(self):
         for value in (0.0, 0.5, 1.0, 1.3, 1.5):
@@ -28,11 +27,16 @@ class AtomEncoding(unittest.TestCase):
         self.assertEqual(M._float_to_cardinal(1.0), 1065353216)
         self.assertAlmostEqual(M._cardinal_to_float(1065353216), 1.0, places=6)
 
+    def test_negative_values_use_the_unsigned_bit_pattern(self):
+        # SDR_UNSET is written back to gamescope, and xprop's 32c is unsigned.
+        self.assertEqual(M._float_to_cardinal(M.SDR_UNSET), 0xBF800000)
+        self.assertEqual(M._cardinal_to_float(0xBF800000), M.SDR_UNSET)
+
     def test_none_does_not_raise(self):
         self.assertIsNone(M._cardinal_to_float(None))
 
 
-class Environment(unittest.TestCase):
+class Environment(PluginTest):
 
     def test_loader_variables_are_stripped(self):
         """Inheriting Steam's LD_LIBRARY_PATH kills any system binary we spawn."""
@@ -49,7 +53,7 @@ class Environment(unittest.TestCase):
             os.environ.pop("LD_PRELOAD", None)
 
 
-class XpropPaths(unittest.TestCase):
+class XpropPaths(PluginTest):
     def test_quoted_paths_are_unescaped_without_corrupting_utf8(self):
         cases = [(r'"/tmp/a\"b\\c.cube"', '/tmp/a"b\\c.cube'),
                  (r'"/tmp/a\011b\012c.cube"', '/tmp/a\tb\nc.cube'),
@@ -64,7 +68,41 @@ class XpropPaths(unittest.TestCase):
             self.assertIsNone(M._read_string_atom(M.ATOM_EDID_PATH))
 
 
-class CrossServerWriter(unittest.TestCase):
+class AtomWrites(PluginTest):
+    """Every other suite mocks these, so this pins the command gamescope sees:
+    a wrong format letter would otherwise go unnoticed until a device run."""
+
+    def setUp(self):
+        self.run = patch.object(M.subprocess, "run").start()
+        self.addCleanup(patch.stopall)
+        patch.object(M, "_native_lut_python", return_value=None).start()
+        M.DISPLAY = ":7"
+
+    def test_the_sdr_float_goes_out_as_a_32_bit_cardinal(self):
+        self.assertTrue(M._write_float_atom(M.ATOM_SDR_WIDENESS, 1.0))
+        command = self.run.call_args.args[0]
+        self.assertEqual(command, ["xprop", "-root", "-f", M.ATOM_SDR_WIDENESS, "32c",
+                                   "-set", M.ATOM_SDR_WIDENESS, "1065353216"])
+        kwargs = self.run.call_args.kwargs
+        self.assertTrue(kwargs["check"])
+        self.assertEqual(kwargs["env"]["DISPLAY"], ":7")
+        self.assertEqual(kwargs["timeout"], M._xprop_timeout)
+
+    def test_a_look_path_goes_out_as_utf8_unchanged(self):
+        path = "/home/deck/.local/share/look dir/żółw.cube"
+        self.assertTrue(M._write_string_atom(M.ATOM_LOOK_PQ, path))
+        self.assertEqual(self.run.call_args.args[0],
+                         ["xprop", "-root", "-f", M.ATOM_LOOK_PQ, "8u", "-set", M.ATOM_LOOK_PQ, path])
+
+    def test_a_failing_or_hanging_xprop_is_a_failed_write(self):
+        for failure in (M.subprocess.CalledProcessError(1, "xprop"),
+                        M.subprocess.TimeoutExpired("xprop", 3), FileNotFoundError("xprop")):
+            with self.subTest(failure=type(failure).__name__):
+                self.run.side_effect = failure
+                self.assertFalse(M._write_string_atom(M.ATOM_LOOK_G22, "/x.cube"))
+
+
+class CrossServerWriter(PluginTest):
 
     def setUp(self):
         self.real_run, self.real_display = M.subprocess.run, M.DISPLAY
@@ -85,14 +123,20 @@ class CrossServerWriter(unittest.TestCase):
 
     def test_the_server_we_use_is_not_evidence_against_itself(self):
         self._serve({":0": f"{M.ATOM_SDR_WIDENESS}(CARDINAL) = 1065353216"})
-        self.assertFalse(M._other_writer_present())
+        self.assertEqual(M._foreign_sdr_values(), ())
 
-    def test_the_atom_turning_up_elsewhere_is(self):
+    def test_the_atom_turning_up_elsewhere_is_reported_with_its_value(self):
         self._serve({":1": f"{M.ATOM_SDR_WIDENESS}(CARDINAL) = 1056964608"})
-        self.assertTrue(M._other_writer_present())
+        self.assertEqual(M._foreign_sdr_values(), ((":1", "1056964608"),))
+
+    def test_an_unreadable_server_is_no_reading_at_all(self):
+        def run(cmd, **kw):
+            raise M.subprocess.TimeoutExpired(cmd, kw["timeout"])
+        M.subprocess.run = run
+        self.assertIsNone(M._foreign_sdr_values())
 
 
-class DisplayChoice(unittest.TestCase):
+class DisplayChoice(PluginTest):
     """gamescope publishes feedback atoms on every XWayland server but the
     colour controls on only one, and writing to the wrong one fails silently."""
 
@@ -160,6 +204,23 @@ class DisplayChoice(unittest.TestCase):
         self.assertEqual(M._pick_display(), ":0")
         self.assertEqual(M.DISPLAY, ":0")
 
+    def test_a_repeated_search_logs_only_what_changed(self):
+        """Without gamescope (Desktop Mode) the search repeats for hours."""
+        self._serve({})
+        with patch.object(M.decky.logger, "info") as info:
+            for _ in range(3):
+                self.assertIsNone(M._pick_display())
+            self._serve({":0": self.PRIMARY})
+            M._pick_display()
+        self.assertEqual(info.call_count, 2)
+
+    def test_the_server_reporting_docking_wins_over_a_fuller_one(self):
+        """IS_EXTERNAL exists only on gamescope's first server; reading it from
+        another would see it absent and never stand down for a monitor."""
+        root = self.SECONDARY + f"\n{M.ATOM_IS_EXTERNAL}(CARDINAL) = 0"
+        self._serve({":0": self.PRIMARY, ":1": root})
+        self.assertEqual(M._pick_display(), ":1")
+
     def test_a_thin_server_still_counts_as_gamescope(self):
         """gamescope reads the atom off whichever root the event arrived on, so
         a server carrying only feedback atoms is still a working target - it is
@@ -182,7 +243,7 @@ class DisplayChoice(unittest.TestCase):
         self.assertEqual(M._count_gamescope_atoms(":0"), 0)
 
 
-class SocketIdentity(unittest.TestCase):
+class SocketIdentity(PluginTest):
     def test_identity_detects_replacement_at_same_display_and_missing_path(self):
         with tempfile.TemporaryDirectory() as folder, patch.object(M, "X11_SOCKET_DIR", folder), \
                 patch.object(M, "DISPLAY", ":12"):

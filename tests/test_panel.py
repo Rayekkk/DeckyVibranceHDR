@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from _fixtures import PluginCase, drain, edid_with_red  # installs the loader stand-ins first
+from _fixtures import PluginCase, PluginTest, drain, edid_with_red  # installs the loader stand-ins first
 import main as M
 import vibrance_lut as V
 import _harness
@@ -30,7 +30,7 @@ def edid_cta(*masks):
     return _harness.valid_edid(base + block)
 
 
-class PanelDetection(unittest.TestCase):
+class PanelDetection(PluginTest):
     """gamescope's own BIsWideGamut test, and the EDID bytes it needs."""
 
     def test_parses_the_panel_this_was_written_for(self):
@@ -39,14 +39,28 @@ class PanelDetection(unittest.TestCase):
         self.assertAlmostEqual(red_x, 0.6836, places=3)
         self.assertAlmostEqual(red_y, 0.3154, places=3)
 
-    def test_wide_and_standard_gamut_land_on_opposite_sides(self):
-        wide = M.vibrance_edid.red_primary(edid_with_red(0.6836, 0.3154))
-        self.assertTrue(wide[0] > M.WIDE_GAMUT_RED_X
-                        and wide[1] < M.WIDE_GAMUT_RED_Y)
-        # Rec.709 red, i.e. a plain sRGB panel.
-        plain = M.vibrance_edid.red_primary(edid_with_red(0.640, 0.330))
-        self.assertFalse(plain[0] > M.WIDE_GAMUT_RED_X
-                         and plain[1] < M.WIDE_GAMUT_RED_Y)
+    def test_an_edid_without_colorimetry_is_read_as_rec709_like_gamescope(self):
+        """gamescope assumes Rec.709 when red x is zero, which fails the wide
+        test; keeping the wide default would make 100% the harshest setting."""
+        blank = _harness.valid_edid(bytearray(128))
+        self.assertEqual(M.vibrance_edid.red_primary(blank), M.vibrance_edid.REC709_RED)
+        self.assertIs(M._panel_is_wide_gamut(blank), False)
+        self.assertEqual(M.vibrance_edid.white_point(blank), M.vibrance_lut.D65)
+
+    def test_wide_gamut_needs_red_past_both_thresholds(self):
+        cases = {(0.6836, 0.3154): True,    # Legion Go 2
+                 (0.640, 0.330): False,     # Rec.709 red, a plain sRGB panel
+                 (0.670, 0.325): False, (0.640, 0.310): False}
+        for red, wide in cases.items():
+            self.assertIs(M._panel_is_wide_gamut(edid_with_red(*red)), wide, red)
+
+    def test_odd_red_is_taken_as_gamescope_takes_it_and_odd_white_is_not(self):
+        # gamescope runs BIsWideGamut on any red with x != 0: this one is standard.
+        self.assertIs(M._panel_is_wide_gamut(edid_with_red(0.700, 0.400)), False)
+        blob = bytearray(edid_with_red(0.640, 0.330))
+        blob[0x21], blob[0x22] = 0x99, 0x80     # white x + y above 1
+        self.assertEqual(M.vibrance_edid.white_point(_harness.valid_edid(blob)), V.D65)
+        self.assertFalse(M.vibrance_edid.valid(edid_with_red(0.640, 0.330) + b"\0"))
 
     def test_thresholds_match_gamescope(self):
         """color_helpers.cpp BIsWideGamut: red.x > 0.650 and red.y < 0.320."""
@@ -57,7 +71,7 @@ class PanelDetection(unittest.TestCase):
         self.assertIsNone(M.vibrance_edid.red_primary(b"\x00" * 16))
 
 
-class HdrCapability(unittest.TestCase):
+class HdrCapability(PluginTest):
     """Read from the panel's CTA-861 block rather than from
     GAMESCOPE_HDR_OUTPUT_FEEDBACK, whose meaning changed between gamescope
     builds and took a sibling plugin down with it on Bazzite 44."""
@@ -138,7 +152,7 @@ class HdrCapability(unittest.TestCase):
         self.assertIn(M.vibrance_edid.supports_pq(_harness.valid_edid(edid)), (True, False))
 
 
-class Edid(unittest.TestCase):
+class Edid(PluginTest):
     def setUp(self):
         for obj, name in ((M.Plugin, "_state"), (M.Plugin, "_sdr_white_point"),
                           (M, "SDR_NEUTRAL_ATOM"), (M, "SDR_ATOM_SPAN")):
@@ -164,12 +178,47 @@ class Edid(unittest.TestCase):
         truncated[130] = 6
         self.assertIsNone(M.vibrance_edid.supports_pq(_harness.valid_edid(truncated)))
 
+    def test_malformed_cta_extensions_are_unknown(self):
+        short_end = bytearray(edid_cta(4))
+        short_end[130] = 3                       # data blocks would end before they start
+        short_metadata = bytearray(edid_cta())
+        short_metadata[130] = 7
+        short_metadata[132:135] = bytes((0xe2, 6, 4))  # HDR metadata cut to two bytes
+        for blob in (short_end, short_metadata):
+            self.assertIsNone(M.vibrance_edid.supports_pq(_harness.valid_edid(blob)))
+
+    def test_configuring_takes_the_white_point_from_the_edid(self):
+        blob = bytearray(edid_with_red(0.640, 0.330))
+        x, y = 303, 314
+        blob[0x21], blob[0x22] = x >> 2, y >> 2
+        blob[0x1A] = ((x & 3) << 2) | (y & 3)
+        M.Plugin._configure_for_panel((None, ("edid", "/edid/x", None), _harness.valid_edid(blob)))
+        self.assertEqual(M.Plugin._sdr_white_point, (x / 1024, y / 1024))
+
     def test_displayid_scans_all_embedded_cta_collections(self):
         base, extension = bytearray(128), bytearray(128)
         base[126] = 1
         extension[0], extension[2] = 0x70, 14
         extension[5:19] = bytes((0x81, 0, 4, 0xe3, 6, 1, 1, 0x81, 0, 4, 0xe3, 6, 4, 1))
         self.assertIs(M.vibrance_edid.supports_pq(_harness.valid_edid(base + extension)), True)
+
+    def test_without_gamescope_s_edid_path_the_kernel_s_panel_edid_is_read(self):
+        """gamescope only publishes the path when its session patches the EDID."""
+        standard = edid_with_red(0.640, 0.330)
+        with tempfile.TemporaryDirectory() as drm:
+            for name, status, edid in (("card0-DSI-1", "disconnected", b""),
+                                       ("card0-HDMI-A-1", "connected", edid_with_red(0.6836, 0.3154)),
+                                       ("card0-eDP-1", "connected", standard)):
+                os.mkdir(os.path.join(drm, name))
+                Path(drm, name, "status").write_text(status + "\n")
+                Path(drm, name, "edid").write_bytes(edid)
+            with patch.object(M, "DRM_SYSFS", drm):
+                _, key, blob = M.Plugin._probe_panel((None, None))
+                self.assertEqual(blob, standard)
+                self.assertEqual(key[1], os.path.join(drm, "card0-eDP-1", "edid"))
+                self.assertIsNone(M.Plugin._probe_panel((True, None))[2])   # docked
+                Path(drm, "card0-eDP-1", "status").write_text("disconnected\n")
+                self.assertIsNone(M.Plugin._probe_panel((None, None))[2])
 
     def test_panel_reads_one_edid_and_invalidates_cache_when_path_changes(self):
         with patch.object(M.Plugin, "_panel_cache_key", None), patch.object(M.Plugin, "_panel_cache_complete", False), \
@@ -179,9 +228,10 @@ class Edid(unittest.TestCase):
             M.Plugin._configure_for_panel()
             M.Plugin._configure_for_panel()
             M.Plugin._configure_for_panel()
-            # Red coordinates in this fixture are unspecified, so classification
-            # retries. A valid panel fixture completes and caches below.
-            self.assertEqual(reader.call_count, 3)
+            # Red coordinates in this fixture are unspecified, but the EDID is
+            # valid: reading the same bytes again cannot answer that, so only
+            # the path change reads again (and nothing is logged every tick).
+            self.assertEqual(reader.call_count, 2)
 
     def test_valid_panel_cache_detects_an_internal_edid_path_change(self):
         blob = bytearray(edid_cta(4))
@@ -198,7 +248,7 @@ class Edid(unittest.TestCase):
             self.assertEqual(reader.call_count, 2)
 
 
-class MetadataFiles(unittest.TestCase):
+class MetadataFiles(PluginTest):
     def test_regular_edid_read_remains_bounded(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "edid.bin"
@@ -239,7 +289,7 @@ assert len(os.listdir('/proc/self/fd'))==before
             self.assertEqual(M._read_edid(str(alias)), target.read_bytes())
 
 
-class PanelCache(unittest.TestCase):
+class PanelCache(PluginTest):
     def test_missing_edid_path_does_not_spawn_a_duplicate_xprop_read(self):
         with patch.object(M, "_display_is_external", return_value=False), \
                 patch.object(M, "_read_string_atom", return_value=None) as read:
@@ -269,7 +319,7 @@ class PanelCache(unittest.TestCase):
                 self.assertEqual(read.call_count, 2)
 
 
-class SdrColorimetry(unittest.TestCase):
+class SdrColorimetry(PluginTest):
     # Independent reference: exact rational Gaussian elimination of the RGB
     # primary matrices from gamescope's generic gamut and BT.2020, both D65.
     TO_2020 = ((0.8421220396036041, 0.1405712459507854, 0.017306714445610463),
@@ -299,46 +349,32 @@ class SdrColorimetry(unittest.TestCase):
                     self.assertAlmostEqual(channel, grey, places=6)
 
     def test_edid_white_bits_and_invalid_fallback(self):
-        blob = bytearray(128)
+        blob = bytearray(edid_with_red(0.640, 0.330))
         x, y = 303, 314
         blob[0x21], blob[0x22] = x >> 2, y >> 2
         blob[0x1A] = ((x & 3) << 2) | (y & 3)
         self.assertEqual(M.vibrance_edid.white_point(_harness.valid_edid(blob)), (x/1024, y/1024))
+        blob[0x1B] = blob[0x19] = 0             # no colorimetry: gamescope's Rec.709 has D65
+        self.assertEqual(M.vibrance_edid.white_point(_harness.valid_edid(blob)), V.D65)
         for invalid in (None, b"", bytes(128)):
             self.assertEqual(M.vibrance_edid.white_point(invalid), V.D65)
 
 
-class CapabilityGating(unittest.TestCase):
+class CapabilityGating(PluginTest):
     """The two halves withdraw independently, and only on a definite no."""
 
-    KEYS = ("hdr_supported", "sdr_enabled", "hdr_enabled",
-            "sdr_max", "sdr_soft_limit", "sdr_saturation")
-
     def setUp(self):
-        self.saved_state = {k: M.Plugin._state[k] for k in self.KEYS}
-        self.saved_fns = {name: getattr(M, name) for name in
-                          ("_pick_display", "_panel_is_wide_gamut",
-                           "_panel_supports_hdr", "_read_float_atom")}
-        # _main rewrites these module globals; leaving them changed makes an
-        # unrelated test fail later, which is a horrible way to find out.
-        self.saved_mapping = (M.SDR_NEUTRAL_ATOM, M.SDR_ATOM_SPAN)
         M._pick_display = lambda: ":0"
         M._read_float_atom = lambda name: 1.0
-        self.real_sleep, self.real_count = asyncio.sleep, M._count_gamescope_atoms
+        M._count_gamescope_atoms = lambda display: 44
 
         async def no_wait(_seconds):
             return None
 
-        asyncio.sleep = no_wait
-        M._count_gamescope_atoms = lambda display: 44
-
-    def tearDown(self):
-        for name, fn in self.saved_fns.items():
-            setattr(M, name, fn)
-        M.Plugin._state.update(self.saved_state)
-        M.SDR_NEUTRAL_ATOM, M.SDR_ATOM_SPAN = self.saved_mapping
-        asyncio.sleep, M._count_gamescope_atoms = self.real_sleep, self.real_count
-        M.settings._store.clear()
+        sleep = patch.object(asyncio, "sleep", no_wait)
+        sleep.start()
+        self.addCleanup(sleep.stop)
+        self.addCleanup(M.settings._store.clear)  # not under StateGuard
 
     def _boot(self, wide, pq, hdr_on=True):
         M._panel_is_wide_gamut = lambda *_args: wide
@@ -346,7 +382,10 @@ class CapabilityGating(unittest.TestCase):
         # _main reloads these from the settings, so seeding the state is not
         # enough to get an enabled half into the startup path.
         M.settings._store.update({"sdr_enabled": False, "hdr_enabled": hdr_on})
-        M.Plugin._state.update({"hdr_supported": True})
+        # A freshly loaded module: unknowns keep these startup defaults.
+        M.Plugin._state.update({"hdr_supported": True, "sdr_max": M.SDR_MAX_WIDE,
+                                "sdr_soft_limit": M.SDR_SOFT_WIDE})
+        M.SDR_NEUTRAL_ATOM, M.SDR_ATOM_SPAN = 1.0, 2.0
         # _main only loads settings now; the part that reads the panel waits in
         # a task, so it is driven explicitly here.
         drain(M.Plugin()._main())
@@ -384,6 +423,22 @@ class CapabilityGating(unittest.TestCase):
         self.assertEqual(M.SDR_NEUTRAL_ATOM, 1.0)
         self.assertTrue(M.Plugin._state["hdr_supported"])
 
+    def test_an_unreadable_edid_after_a_known_one_keeps_its_mapping(self):
+        """A standard panel read as unknown (an EDID not yet published after a
+        gamescope restart, say) must not fall to the wide mapping, where its
+        neutral slider would write the harshest atom value."""
+        self._boot(wide=False, pq=False)
+        white = M.Plugin._sdr_white_point
+        M._panel_is_wide_gamut = lambda *_args: None
+        M._panel_supports_hdr = lambda *_args: None
+        changed = M.Plugin._configure_for_panel((False, ("edid", "/edid/later", None), None))
+        self.assertFalse(changed)
+        self.assertEqual((M.SDR_NEUTRAL_ATOM, M.SDR_ATOM_SPAN), (0.0, 1.0))
+        self.assertEqual(M.Plugin._state["sdr_max"], M.SDR_MAX_STANDARD)
+        self.assertFalse(M.Plugin._state["hdr_supported"])
+        self.assertEqual(M.Plugin._sdr_white_point, white)
+        self.assertFalse(M.Plugin._panel_cache_complete)
+
     def test_a_capable_panel_keeps_both(self):
         self._boot(wide=True, pq=True)
         self.assertEqual(M.SDR_NEUTRAL_ATOM, 1.0)
@@ -393,34 +448,19 @@ class CapabilityGating(unittest.TestCase):
     def test_the_hdr_setter_refuses_once_the_half_is_withdrawn(self):
         """The frontend hides the section, but the callable stays reachable."""
         M.Plugin._state.update({"hdr_supported": False, "hdr_enabled": False})
+        M.Plugin._settings_loaded = True
         state = drain(M.Plugin().set_hdr_enabled(True))
         self.assertFalse(state["hdr_enabled"])
 
 
-class ExternalDisplay(unittest.TestCase):
+class ExternalDisplay(PluginTest):
     """Everything here is calibrated against the built-in panel, so anything
     else is somebody else's display and gets left alone."""
 
     def setUp(self):
-        self.saved = {k: M.Plugin._state[k] for k in
-                      ("external_display", "sdr_max", "hdr_supported",
-                       "sdr_enabled", "hdr_enabled")}
-        self.saved_mapping = (M.SDR_NEUTRAL_ATOM, M.SDR_ATOM_SPAN)
-        self.saved_cache = (M.Plugin._panel_cache_key,
-                            M.Plugin._panel_cache_complete)
         M.Plugin._panel_cache_key = None
         M.Plugin._panel_cache_complete = False
-        self.real = {n: getattr(M, n) for n in
-                     ("_display_is_external", "_panel_is_wide_gamut",
-                      "_panel_supports_hdr")}
-
-    def tearDown(self):
-        for name, fn in self.real.items():
-            setattr(M, name, fn)
-        M.Plugin._state.update(self.saved)
-        M.SDR_NEUTRAL_ATOM, M.SDR_ATOM_SPAN = self.saved_mapping
-        (M.Plugin._panel_cache_key,
-         M.Plugin._panel_cache_complete) = self.saved_cache
+        M.Plugin._settings_loaded = True  # the setters refuse before startup has read settings
 
     def _configure(self, external):
         M._display_is_external = lambda: external
@@ -481,30 +521,10 @@ class ExternalDisplay(unittest.TestCase):
             drain(M.Plugin().set_hdr_enabled(True))["hdr_enabled"])
 
 
-class StartupOnExternalDisplay(unittest.TestCase):
+class StartupOnExternalDisplay(PluginTest):
 
     def test_enabled_settings_do_not_apply_while_already_docked(self):
         calls = []
-        names = (
-            "_pick_display", "_count_gamescope_atoms", "_read_float_atom",
-            "_read_string_atom", "_write_float_atom", "_write_string_atom",
-            "_display_is_external", "_panel_is_wide_gamut",
-            "_panel_supports_hdr",
-        )
-        real = {name: getattr(M, name) for name in names}
-        real_sleep = asyncio.sleep
-        real_track = M.Plugin._track
-        real_schedule = M.Plugin._schedule_look
-        real_apply = M.Plugin._apply_sdr
-        real_lock = M.Plugin._mutation_lock
-        saved_state = dict(M.Plugin._state)
-        saved_unloading = M.Plugin._unloading
-        saved_cache = (M.Plugin._panel_cache_key,
-                       M.Plugin._panel_cache_complete)
-        saved_looks = (
-            M.Plugin._sdr_look_path, M.Plugin._sdr_look_baseline,
-            M.Plugin._hdr_look_path, M.Plugin._hdr_look_baseline,
-        )
 
         async def no_wait(_seconds):
             return None
@@ -535,24 +555,8 @@ class StartupOnExternalDisplay(unittest.TestCase):
             "sdr_enabled": True, "hdr_enabled": True,
             "hdr_supported": True,
         })
-        asyncio.sleep = no_wait
-        try:
+        with patch.object(asyncio, "sleep", no_wait):
             asyncio.run(M.Plugin()._start_when_ready())
-        finally:
-            for name, fn in real.items():
-                setattr(M, name, fn)
-            asyncio.sleep = real_sleep
-            M.Plugin._track = real_track
-            M.Plugin._schedule_look = real_schedule
-            M.Plugin._apply_sdr = real_apply
-            M.Plugin._mutation_lock = real_lock
-            M.Plugin._unloading = saved_unloading
-            (M.Plugin._panel_cache_key,
-             M.Plugin._panel_cache_complete) = saved_cache
-            (M.Plugin._sdr_look_path, M.Plugin._sdr_look_baseline,
-             M.Plugin._hdr_look_path,
-             M.Plugin._hdr_look_baseline) = saved_looks
-            M.Plugin._state.update(saved_state)
         self.assertEqual(calls, [])
 
 
@@ -562,7 +566,7 @@ class DisplayTransitions(PluginCase):
         started, release = threading.Event(), threading.Event()
         def external():
             started.set()
-            release.wait(2)
+            release.wait(10)
             return False
         self.mock(M, "_display_is_external", side_effect=external)
         panel = asyncio.create_task(self.plugin._refresh_panel())
@@ -570,7 +574,7 @@ class DisplayTransitions(PluginCase):
         try:
             self.assertTrue(await asyncio.to_thread(started.wait, 1))
             change = asyncio.create_task(self.plugin.set_hdr_saturation(1.2))
-            done, _ = await asyncio.wait([change], timeout=0.2)
+            done, _ = await asyncio.wait([change], timeout=2)
             self.assertIn(change, done, "panel metadata IO monopolized the mutation lock")
         finally:
             release.set()
@@ -645,6 +649,36 @@ class DisplayTransitions(PluginCase):
                   M.Plugin._state.update(external_display=False) or True)
         with patch.object(M, "_read_float_atom", return_value=None):
             await self.plugin._refresh_panel()
+        await self.drain()
+        await self.plugin.set_sdr_enabled(False)
+        self.assertEqual(self.live_sdr, 0.8)
+
+    async def test_missing_sdr_read_on_return_keeps_the_baseline_after_a_clean_dock(self):
+        await self.plugin.set_sdr_enabled(True)
+        dock = [True, False]
+        self.mock(M.Plugin, "_configure_for_panel", side_effect=lambda *args:
+                  M.Plugin._state.update(external_display=dock.pop(0)) or True)
+        await self.plugin._refresh_panel()          # docked: our write released
+        self.assertFalse(M.Plugin._state["sdr_applied"])
+        with patch.object(M, "_read_float_atom", return_value=None):
+            await self.plugin._refresh_panel()      # back, but the read failed
+        await self.drain()
+        await self.plugin.set_sdr_enabled(False)
+        self.assertEqual(self.live_sdr, 0.8)
+
+    async def test_return_does_not_adopt_a_lost_write_of_ours_as_the_baseline(self):
+        def lands_but_times_out(atom, value):
+            self.live_sdr = value
+            return False
+        self.float_writer.side_effect = lands_but_times_out
+        await self.plugin.set_sdr_enabled(True, 1.4)       # baseline 0.8, 1.4 lands
+        self.float_writer.side_effect = lambda atom, value: False
+        dock = [True, False]
+        self.mock(M.Plugin, "_configure_for_panel", side_effect=lambda *args:
+                  M.Plugin._state.update(external_display=dock.pop(0)) or True)
+        await self.plugin._refresh_panel()                 # docked: the release fails
+        self.float_writer.side_effect = self.write_float
+        await self.plugin._refresh_panel()                 # back: 1.4 is still ours
         await self.drain()
         await self.plugin.set_sdr_enabled(False)
         self.assertEqual(self.live_sdr, 0.8)

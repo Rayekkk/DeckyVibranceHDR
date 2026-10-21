@@ -9,25 +9,26 @@ import http.client
 import io
 import json
 import os
+import runpy
 import socket
 import subprocess
 import sys
 import tempfile
 import threading
 import time
-import unittest
 import urllib.request
+import warnings
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import _fixtures  # noqa: F401  installs the loader stand-ins first
+from _fixtures import PluginTest  # installs the loader stand-ins first
 import main as M
 import lego_updater as U
 
 
-class Updater(unittest.TestCase):
+class Updater(PluginTest):
     def test_decky_host_user_precedes_the_first_passwd_entry(self):
         user = SimpleNamespace(pw_dir="/home/player", pw_uid=1001, pw_gid=1001)
         with patch.dict(U.os.environ, {"DECKY_USER": "player"}), \
@@ -144,6 +145,74 @@ class Updater(unittest.TestCase):
         self.assertTrue(result["success"], result)
         self.assertEqual(data, payload)
 
+    def test_as_root_a_download_folder_outside_home_is_refused(self):
+        """user-dirs.dirs is the user's file. A root plugin must not create and
+        then hand over whatever directory it names, and must change ownership
+        through its own descriptor rather than a path the user could swap."""
+        updater = self.make()
+        name = "DeckyVibranceHDR-9.0.0.zip"
+        url = "https://github.com/Rayekkk/DeckyVibranceHDR/releases/download/9.0.0/" + name
+        updater._checked_asset = (url, name)
+        payload = self.archive()
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as elsewhere, \
+                patch.object(U, "real_user", return_value=SimpleNamespace(pw_dir=home, pw_uid=1000, pw_gid=1000)), \
+                patch.object(U, "xdg_download_dir", return_value=os.path.join(elsewhere, "target")), \
+                patch.object(U.os, "geteuid", create=True, return_value=0), \
+                patch.object(U.os, "chown", create=True) as chown, \
+                patch.object(U.os, "fchown", create=True) as fchown, \
+                patch.object(updater, "download_to", side_effect=lambda _url, out, timeout: out.write(payload)):
+            result = updater.download(url, name)
+            self.assertTrue(result["success"], result)
+            self.assertEqual(result["path"], os.path.join(home, "Downloads", name))
+            self.assertEqual(os.listdir(elsewhere), [])
+            chown.assert_called_once_with(os.path.join(home, "Downloads"), 1000, 1000)
+            (fd, uid, gid), _ = fchown.call_args
+            self.assertIsInstance(fd, int)
+            self.assertEqual((uid, gid), (1000, 1000))
+
+    def test_as_root_a_downloads_symlink_out_of_home_is_refused(self):
+        updater = self.make()
+        name = "DeckyVibranceHDR-9.0.0.zip"
+        url = "https://github.com/Rayekkk/DeckyVibranceHDR/releases/download/9.0.0/" + name
+        updater._checked_asset = (url, name)
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as elsewhere:
+            try:
+                os.symlink(elsewhere, os.path.join(home, "Downloads"), target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("this platform cannot create the symlink fixture")
+            with patch.object(U, "real_user", return_value=SimpleNamespace(pw_dir=home, pw_uid=1000, pw_gid=1000)), \
+                    patch.object(U, "xdg_download_dir", return_value=os.path.join(home, "Downloads")), \
+                    patch.object(U.os, "geteuid", create=True, return_value=0), \
+                    patch.object(U.os, "chown", create=True), patch.object(U.os, "fchown", create=True), \
+                    patch.object(updater, "download_to") as download:
+                result = updater.download(url, name)
+            self.assertFalse(result["success"])
+            self.assertIn("outside the user's home", result["error"])
+            download.assert_not_called()
+            self.assertEqual(os.listdir(elsewhere), [])
+
+    def test_within_follows_the_real_paths(self):
+        with tempfile.TemporaryDirectory() as home:
+            self.assertTrue(U.within(os.path.join(home, "Downloads"), home))
+            self.assertTrue(U.within(home, home))
+            self.assertFalse(U.within(os.path.join(home, "..", "other"), home))
+            self.assertFalse(U.within(home + "-sibling", home))
+
+    def test_open_url_installs_the_redirect_check(self):
+        """The handler is tested on its own elsewhere; this pins that real
+        requests go through it, with certificate checks on."""
+        updater = self.make()
+        opener = SimpleNamespace(open=lambda request, timeout: (request, timeout))
+        with patch.object(U.urllib.request, "build_opener", return_value=opener) as build:
+            request, timeout = updater.open_url(M.GITHUB_RELEASES_URL, timeout=7)
+        handlers = build.call_args.args
+        self.assertTrue(any(isinstance(h, U.CheckedRedirect) for h in handlers))
+        https = next(h for h in handlers if isinstance(h, U.urllib.request.HTTPSHandler))
+        self.assertEqual(https._context.verify_mode, U.ssl.CERT_REQUIRED)
+        self.assertEqual((request.full_url, timeout), (M.GITHUB_RELEASES_URL, 7))
+        with self.assertRaises(ValueError):
+            updater.open_url("https://example.com/release.zip", timeout=7)
+
     def test_bad_archives_never_replace_the_previous_download(self):
         for payload in (b"not a zip", self.archive({"../escape": "x"}),
                         self.archive({"OtherPlugin/main.py": "x"}),
@@ -172,7 +241,7 @@ class Updater(unittest.TestCase):
                 updater.download_to("https://github.com/file", io.BytesIO(), 60)
 
 
-class ArchiveNames(unittest.TestCase):
+class ArchiveNames(PluginTest):
     make = Updater.make
     archive = Updater.archive
     attempt = Updater.attempt
@@ -192,7 +261,7 @@ class ArchiveNames(unittest.TestCase):
         self.assertEqual(data, b"previous")
 
 
-class UpdateMetadata(unittest.TestCase):
+class UpdateMetadata(PluginTest):
     def test_semver_precedence_handles_numeric_and_text_identifiers(self):
         ordered = ("1.0.0-alpha", "1.0.0-alpha.1", "1.0.0-alpha.beta", "1.0.0-beta",
                    "1.0.0-beta.2", "1.0.0-beta.11", "1.0.0-rc.1", "1.0.0", "1.0.1")
@@ -273,7 +342,7 @@ class UpdateMetadata(unittest.TestCase):
                 self.assertEqual(U.xdg_download_dir(home), os.path.join(home, "Downloads"), line)
 
 
-class UpdateChecks(unittest.TestCase):
+class UpdateChecks(PluginTest):
     def overlapping_checks(self, newest):
         updater = U.Updater(releases_url=M.GITHUB_RELEASES_URL, user_agent="test", log_prefix="test",
                             plugin_dir=M.PLUGIN_DIR, logger=M.decky.logger,
@@ -319,7 +388,7 @@ class UpdateChecks(unittest.TestCase):
         self.assertNotIn("download_url", older)
 
 
-class HttpBounds(unittest.TestCase):
+class HttpBounds(PluginTest):
     def updater(self):
         return U.Updater(releases_url=M.GITHUB_RELEASES_URL, user_agent="test", log_prefix="test",
                          plugin_dir=M.PLUGIN_DIR, logger=M.decky.logger)
@@ -334,7 +403,7 @@ class HttpBounds(unittest.TestCase):
                 right.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 16\r\n\r\n")
                 for _ in range(16):
                     right.sendall(b"x")
-                    if finished.wait(0.03):
+                    if finished.wait(0.1):
                         break
             except OSError:
                 pass
@@ -351,7 +420,8 @@ class HttpBounds(unittest.TestCase):
             with patch.object(updater, "open_url", return_value=response):
                 with self.assertRaises(TimeoutError):
                     updater.download_to("https://github.com/test", io.BytesIO(), 0.06)
-            self.assertLess(time.monotonic() - started, 0.25)
+            # 16 bytes at 0.1 s take 1.6 s, so this only passes if the deadline cut in.
+            self.assertLess(time.monotonic() - started, 1.0)
         finally:
             finished.set()
             left.close()
@@ -374,7 +444,7 @@ class HttpBounds(unittest.TestCase):
             self.assertIn("size limit", updater.check()["error"])
 
 
-class UpdateAssetValidation(unittest.TestCase):
+class UpdateAssetValidation(PluginTest):
 
     def check(self, *names):
         base = "https://github.com/Rayekkk/DeckyVibranceHDR/releases/download/2.0.0/"
@@ -399,7 +469,7 @@ class UpdateAssetValidation(unittest.TestCase):
         self.assertEqual(info["asset_name"], expected)
 
 
-class ReleaseVerifier(unittest.TestCase):
+class ReleaseVerifier(PluginTest):
     def test_optimized_python_cannot_skip_archive_validation(self):
         verifier = Path(__file__).resolve().parent.parent / "scripts" / "verify_package.py"
         with tempfile.TemporaryDirectory() as folder:
@@ -415,3 +485,120 @@ class ReleaseVerifier(unittest.TestCase):
                 result = subprocess.run([sys.executable, *flags, "-c", code, str(verifier), str(root)],
                                         capture_output=True, text=True)
                 self.assertNotEqual(result.returncode, 0, flags)
+                # The first check must fire; a KeyError further on would hide -O skipping it.
+                self.assertIn("unsafe ZIP path", result.stderr, flags)
+
+    def test_release_check_refuses_uncommitted_shipped_files(self):
+        committed = runpy.run_path(str(Path(__file__).resolve().parent.parent
+                                       / "scripts" / "verify_package.py"))["committed"]
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            committed(root)  # not a checkout: nothing to compare against
+            (root / ".git").mkdir()
+            with self.assertRaises(subprocess.CalledProcessError):
+                committed(root)  # a checkout git cannot read stops the release
+            (root / ".git").rmdir()
+            def git(*args):
+                subprocess.run(["git", "-c", "user.name=t", "-c", "user.email=t@t", *args],
+                               cwd=root, check=True, capture_output=True)
+            git("init", "-q")
+            (root / "main.py").write_text("shipped")
+            git("add", "main.py")
+            git("commit", "-q", "-m", "release")
+            (root / "notes.txt").write_text("not shipped")
+            committed(root)
+            (root / "main.py").write_text("edited after the commit")
+            with self.assertRaisesRegex(ValueError, "uncommitted changes would ship"):
+                committed(root)
+            with patch.dict(os.environ, {"DVH_ALLOW_DIRTY": "1"}):
+                committed(root)
+
+    def test_source_map_ties_the_shipped_frontend_to_src(self):
+        check = runpy.run_path(str(Path(__file__).resolve().parent.parent
+                                   / "scripts" / "verify_package.py"))["check_source_map"]
+        base = "decky://decky/plugin/Decky%20Vibrance%20HDR/"
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "src").mkdir()
+            (root / "src" / "index.tsx").write_bytes(b"ui\r\n")
+            def source_map(prefix=base, text="ui\r\n"):
+                return {"sources": [prefix + "node_modules/@decky/api/dist/index.js",
+                                    prefix + "src/index.tsx"],
+                        "sourcesContent": ["api", text]}
+            check(root, source_map())
+            with self.assertRaisesRegex(ValueError, "stale frontend build"):
+                check(root, source_map(text="ui before the last commit\r\n"))
+            with self.assertRaisesRegex(ValueError, "not rewritten"):
+                check(root, source_map(prefix="../"))
+            (root / "src" / "stateSync.ts").write_text("new file")
+            with self.assertRaisesRegex(ValueError, "does not cover"):
+                check(root, source_map())
+
+
+class ArchiveRules(PluginTest):
+    make = Updater.make
+    archive = Updater.archive
+    attempt = Updater.attempt
+
+    def files(self, **changes):
+        version = "9.0.0"
+        files = {"main.py": "# plugin", "lego_updater.py": "# updater", "vibrance_lut.py": "# lut",
+                 "plugin.json": json.dumps({"version": version}),
+                 "package.json": json.dumps({"version": version}), "dist/index.js": "export default {}"}
+        files.update(changes)
+        return {"DeckyVibranceHDR/" + k: v for k, v in files.items() if v is not None}
+
+    def refused(self, payload):
+        result, data = self.attempt(payload)
+        self.assertFalse(result["success"], result)
+        self.assertEqual(data, b"previous")
+
+    def test_each_archive_rule_refuses_on_its_own(self):
+        self.refused(self.archive(self.files(**{"dist/index.js": None})))
+        self.refused(self.archive({**self.files(), "Elsewhere/readme": "x"}))
+        self.refused(self.archive(self.files(**{"plugin.json": json.dumps({"version": "8.0.0"}),
+                                                "package.json": json.dumps({"version": "8.0.0"})})))
+        self.refused(self.archive(self.files(**{"package.json": json.dumps({"version": "8.0.0"})})))
+
+    def test_symlink_entries_are_refused(self):
+        output = io.BytesIO(self.archive())
+        with zipfile.ZipFile(output, "a") as archive:
+            info = zipfile.ZipInfo("DeckyVibranceHDR/link")
+            info.external_attr = (0o120777 << 16)
+            archive.writestr(info, "/etc/passwd")
+        self.refused(output.getvalue())
+
+    def test_duplicate_entries_are_refused(self):
+        output = io.BytesIO(self.archive())
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")  # zipfile warns about the duplicate
+            with zipfile.ZipFile(output, "a") as archive:
+                archive.writestr("DeckyVibranceHDR/main.py", "# second")
+        self.refused(output.getvalue())
+
+    def test_oversized_expansion_is_refused(self):
+        with patch.object(U, "MAX_DOWNLOAD_BYTES", 8):
+            self.refused(self.archive())
+
+    def test_lookalike_hosts_are_refused(self):
+        for url in ("https://evilgithub.com/x", "https://github.com.evil.example/x",
+                    "https://api.github.com.evil.example/x"):
+            with self.assertRaises(ValueError):
+                U.checked_url(url)
+
+    def test_a_failed_recheck_withdraws_the_earlier_authorization(self):
+        updater = self.make()
+        url = "https://github.com/Rayekkk/DeckyVibranceHDR/releases/download/9.0.0/DeckyVibranceHDR-9.0.0.zip"
+        good = {"tag_name": "9.0.0", "assets": [{"name": "DeckyVibranceHDR-9.0.0.zip", "browser_download_url": url}]}
+        with patch.object(updater, "plugin_version", return_value="8.0.0"), \
+                patch.object(updater, "open_url", return_value=io.BytesIO(json.dumps(good).encode())):
+            updater.check()
+        self.assertIsNotNone(updater._checked_asset)
+        with patch.object(updater, "plugin_version", return_value="8.0.0"), \
+                patch.object(updater, "open_url", side_effect=OSError("offline")):
+            self.assertIn("error", updater.check())
+        self.assertIsNone(updater._checked_asset)
+
+    def test_loader_version_wins_over_plugin_json(self):
+        with patch.dict(os.environ, {"DECKY_PLUGIN_VERSION": "7.7.7"}):
+            self.assertEqual(M.updater.plugin_version(), "7.7.7")

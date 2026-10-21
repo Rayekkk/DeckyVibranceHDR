@@ -19,9 +19,12 @@ That happens before this module is ever imported, and `import x` consults
 sys.modules before sys.path - so a plugin file called `updater.py` never
 loads at all. `from updater import Updater` silently returned the loader's
 own Updater class and both plugins died on the constructor. The names to
-stay away from are browser, enums, helpers, injector, loader, main, settings,
-updater, utilities and wsrouter. (`settings` is the exception we want: that
-alias is how every plugin reaches SettingsManager.)
+stay away from are those of decky_loader's modules and packages: browser,
+enums, helpers, injector, loader, localplatform, main, plugin, settings,
+updater, utilities and wsrouter (checked against decky-loader main,
+2026-10-20), plus `decky` and `decky_plugin`, the modules the loader gives
+every plugin. (`settings` is the exception we want: that alias is how every
+plugin reaches SettingsManager.)
 
 Nothing here imports `decky`, so the module can be exercised by the test
 suites without the loader present.
@@ -128,6 +131,15 @@ def real_user() -> pwd.struct_passwd | None:
          if p.pw_uid >= 1000 and os.path.isdir(p.pw_dir)),
         None,
     )
+
+
+def within(path: str, root: str) -> bool:
+    """True if *path* resolves inside *root* (symlinks followed)."""
+    try:
+        real_root = os.path.realpath(root)
+        return os.path.commonpath([os.path.realpath(path), real_root]) == real_root
+    except ValueError:  # different drives on Windows
+        return False
 
 
 def xdg_download_dir(home_dir: str) -> str:
@@ -365,6 +377,35 @@ class Updater:
         finally:
             self._download_lock.release()
 
+    def _validate_archive(self, source, asset_name) -> None:
+        """Reject anything that is not exactly this plugin's release archive."""
+        with zipfile.ZipFile(source) as archive:
+            if len(archive.namelist()) != len(set(archive.namelist())):
+                raise ValueError("duplicate release archive paths")
+            if not archive.infolist() or sum(i.file_size for i in archive.infolist()) > MAX_DOWNLOAD_BYTES * 8:
+                raise ValueError("empty or oversized release archive")
+            for entry in archive.infolist():
+                path = entry.orig_filename
+                parts = path.rstrip("/").split("/")
+                if (path != entry.filename or "\\" in path or path.startswith("/")
+                        or any(p in ("", ".", "..") for p in parts) or ":" in path):
+                    raise ValueError("unsafe release archive path")
+                if (entry.external_attr >> 16) & 0o170000 == 0o120000:
+                    raise ValueError("release archive contains a symbolic link")
+            if archive.testzip() is not None:
+                raise ValueError("release archive failed its CRC check")
+            if self.archive_root:
+                root = self.archive_root + "/"
+                if any(not name.startswith(root) for name in archive.namelist()):
+                    raise ValueError("release archive contains files outside the plugin directory")
+                required = ("main.py", "plugin.json", "package.json", "dist/index.js") + self.archive_files
+                if any(root + name not in archive.namelist() for name in required):
+                    raise ValueError("release archive is missing plugin runtime files")
+                manifest = json.loads(archive.read(root + "plugin.json"))
+                package = json.loads(archive.read(root + "package.json"))
+                if package.get("version") != manifest.get("version") or self.asset_name(manifest.get("version")) != asset_name:
+                    raise ValueError("release archive version does not match its filename")
+
     def _download(self, download_url, asset_name):
         tmp = None
         try:
@@ -374,54 +415,46 @@ class Updater:
             if self.asset_name and self._checked_asset != (download_url, asset_name):
                 raise ValueError("check for updates before downloading this release asset")
             user = real_user()
+            as_root = hasattr(os, "geteuid") and os.geteuid() == 0
             downloads_dir = xdg_download_dir(user.pw_dir) if user else "/home/deck/Downloads"
+            if as_root and user:
+                # user-dirs.dirs belongs to the user. Root must not create, and
+                # then hand over, a directory it names anywhere else - nor
+                # follow ~/Downloads out of home when that is a symlink.
+                # shortcut: checked by path, so a folder swapped for a symlink
+                # after this check still escapes; closing that needs opens
+                # relative to a dir_fd. Upgrade if a root plugin ships this.
+                if not within(downloads_dir, user.pw_dir):
+                    downloads_dir = os.path.join(user.pw_dir, "Downloads")
+                if not within(downloads_dir, user.pw_dir):
+                    raise ValueError("the download folder resolves outside the user's home")
             created_dir = not os.path.isdir(downloads_dir)
             os.makedirs(downloads_dir, exist_ok=True)
             # If we had to create it, it is owned by root and the user would not
             # be able to manage their own download directory.
-            if user and created_dir and hasattr(os, "geteuid") and os.geteuid() == 0:
+            if user and created_dir and as_root:
                 os.chown(downloads_dir, user.pw_uid, user.pw_gid)
             dest = os.path.join(downloads_dir, asset_name)
 
-            with tempfile.NamedTemporaryFile(mode="wb", dir=downloads_dir,
+            with tempfile.NamedTemporaryFile(mode="w+b", dir=downloads_dir,
                                              prefix=".decky-update-", suffix=".part", delete=False) as f:
                 tmp = f.name
                 written = self.download_to(download_url, f, timeout=60)
                 f.flush()
                 os.fsync(f.fileno())
-
-            with zipfile.ZipFile(tmp) as archive:
-                if len(archive.namelist()) != len(set(archive.namelist())):
-                    raise ValueError("duplicate release archive paths")
-                if not archive.infolist() or sum(i.file_size for i in archive.infolist()) > MAX_DOWNLOAD_BYTES * 8:
-                    raise ValueError("empty or oversized release archive")
-                for entry in archive.infolist():
-                    path = entry.orig_filename
-                    parts = path.rstrip("/").split("/")
-                    if (path != entry.filename or "\\" in path or path.startswith("/")
-                            or any(p in ("", ".", "..") for p in parts) or ":" in path):
-                        raise ValueError("unsafe release archive path")
-                    if (entry.external_attr >> 16) & 0o170000 == 0o120000:
-                        raise ValueError("release archive contains a symbolic link")
-                if archive.testzip() is not None:
-                    raise ValueError("release archive failed its CRC check")
-                if self.archive_root:
-                    root = self.archive_root + "/"
-                    if any(not name.startswith(root) for name in archive.namelist()):
-                        raise ValueError("release archive contains files outside the plugin directory")
-                    required = ("main.py", "plugin.json", "package.json", "dist/index.js") + self.archive_files
-                    if any(root + name not in archive.namelist() for name in required):
-                        raise ValueError("release archive is missing plugin runtime files")
-                    manifest = json.loads(archive.read(root + "plugin.json"))
-                    package = json.loads(archive.read(root + "package.json"))
-                    if package.get("version") != manifest.get("version") or self.asset_name(manifest.get("version")) != asset_name:
-                        raise ValueError("release archive version does not match its filename")
-
-            # Written as root, so hand it back to the desktop user - otherwise
-            # they cannot move or delete their own download.
-            if user and hasattr(os, "geteuid") and os.geteuid() == 0:
-                os.chown(tmp, user.pw_uid, user.pw_gid)
-            os.chmod(tmp, 0o644)
+                # Everything below works through this descriptor, never the
+                # path: the folder is the user's, and a name swapped for a
+                # symlink must not let root validate or chown another file.
+                f.seek(0)
+                self._validate_archive(f, asset_name)
+                # Written as root, so hand it back to the desktop user - otherwise
+                # they cannot move or delete their own download.
+                if user and as_root:
+                    os.fchown(f.fileno(), user.pw_uid, user.pw_gid)
+                if hasattr(os, "fchmod"):
+                    os.fchmod(f.fileno(), 0o644)
+                else:  # Windows dev boxes before Python 3.13; never root there
+                    os.chmod(tmp, 0o644)
             os.replace(tmp, dest)
 
             self._info(f"update downloaded to {dest} ({written} bytes)")

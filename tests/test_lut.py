@@ -11,12 +11,11 @@ import subprocess
 import sys
 import tempfile
 import threading
-import unittest
 from collections import OrderedDict
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import _fixtures  # noqa: F401  installs the loader stand-ins first
+from _fixtures import PluginTest  # installs the loader stand-ins first
 import main as M
 import vibrance_lut as V
 
@@ -24,7 +23,7 @@ import vibrance_lut as V
 CODE_VALUE_10BIT = 1.0 / 1023.0
 
 
-class PqTransfer(unittest.TestCase):
+class PqTransfer(PluginTest):
     """SMPTE ST 2084, with 1.0 encoded meaning 10000 nits."""
 
     def test_round_trip_across_the_useful_range(self):
@@ -39,6 +38,14 @@ class PqTransfer(unittest.TestCase):
         self.assertAlmostEqual(V.linear_to_pq(1.0), 1.0, places=9)
         self.assertEqual(V.pq_to_linear(0.0), 0.0)
 
+    def test_crumbs_snap_to_black(self):
+        # A rounding crumb would otherwise encode as visibly non-zero black.
+        self.assertEqual(V.linear_to_pq(1e-14), 0.0)
+
+    def test_values_past_the_peak_still_round_trip(self):
+        # Boosted chroma pushes the PQ inside ICtCp to about 1.12 before clipping.
+        self.assertAlmostEqual(V.linear_to_pq(V.pq_to_linear(1.1)), 1.1, places=9)
+
     def test_monotonic(self):
         previous = -1.0
         for i in range(0, 1024):
@@ -47,7 +54,7 @@ class PqTransfer(unittest.TestCase):
             previous = value
 
 
-class Saturation(unittest.TestCase):
+class Saturation(PluginTest):
 
     def _grid(self, step=4):
         size = 33
@@ -107,7 +114,7 @@ class Saturation(unittest.TestCase):
                     self.assertLessEqual(channel, 1.0)
 
 
-class CubeFile(unittest.TestCase):
+class CubeFile(PluginTest):
 
     def test_shape_matches_what_gamescope_parses(self):
         size = 9
@@ -149,7 +156,7 @@ class CubeFile(unittest.TestCase):
                 V.generate(1.0, bad)
 
 
-class G22Transfer(unittest.TestCase):
+class G22Transfer(PluginTest):
     """The SDR look runs on gamma-encoded values, not PQ ones."""
 
     def test_round_trip(self):
@@ -204,6 +211,17 @@ class G22Transfer(unittest.TestCase):
         self.assertEqual(V.saturate((0.42, 0.42, 0.42), 1.5)[0],
                          V.saturate((0.42, 0.42, 0.42), 1.5, "pq")[0])
 
+    def test_an_impossible_white_point_is_refused_before_any_build(self):
+        # main.py relies on validate() so the native worker never sees one.
+        for saturation in (1.0, 1.5):
+            for white in ((0.6, 0.5), (0.0, 0.3), (float("nan"), 0.3)):
+                with self.assertRaises(ValueError):
+                    V.validate(saturation, 33, "g22", white)
+
+    def test_a_cancelled_build_stops_before_preparing_its_grid(self):
+        with self.assertRaises(V.BuildCancelled):
+            V._prepared_grid(9, "pq", V.D65, lambda: True)
+
     def test_an_unknown_encoding_is_refused(self):
         with self.assertRaises(ValueError):
             V.saturate((0.5, 0.5, 0.5), 1.5, "srgb")
@@ -215,12 +233,29 @@ class G22Transfer(unittest.TestCase):
         self.assertIn("pq domain", V.generate(1.2, 5))
 
 
-class Lut(unittest.TestCase):
+class Lut(PluginTest):
     def test_production_grids_match_pre_audit_golden_output(self):
         hashes = {"pq": "351335e1d2a649dab1b2f6076f5c4ed27f16e31a286ae5541aa3e879a7f9f4a2",
                   "g22": "4887c2e523a5d3f17fc350364006aac72efa95144004beb0318117e0f9981893"}
         for encoding, expected in hashes.items():
             self.assertEqual(hashlib.sha256(V.generate(1.3, 33, encoding).encode()).hexdigest(), expected)
+
+    def test_an_unwritable_folder_fails_before_the_build(self):
+        with tempfile.TemporaryDirectory() as folder:
+            missing = os.path.join(folder, "gone", "runtime")
+            with patch.object(M, "_runtime_dir", return_value=missing), \
+                    patch.object(M, "_generate_lut") as build, \
+                    patch.object(M, "_lut_writes_disabled", False):
+                self.assertEqual(M._write_look(1.3, 0), "")
+            build.assert_not_called()
+
+    def test_an_unexpected_build_error_leaves_no_temporary_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(M, "_runtime_dir", return_value=folder), \
+                    patch.object(M, "_generate_lut", side_effect=TypeError("bad request")), \
+                    patch.object(M, "_lut_writes_disabled", False):
+                self.assertEqual(M._write_look(1.3, 0), "")
+            self.assertEqual(os.listdir(folder), [])
 
     def test_grid_cache_is_bounded_and_separates_source_whites(self):
         V._grids.clear()
@@ -270,7 +305,7 @@ class Lut(unittest.TestCase):
             generate.assert_not_called()
 
 
-class LutOutput(unittest.TestCase):
+class LutOutput(PluginTest):
     def test_production_clipping_and_source_white_match_independent_prechange_hashes(self):
         # Computed using the captured pre-round-six generator, not the helpers
         # under test. Cover both range ends and non-D65 adaptation at 33^3.
@@ -288,7 +323,7 @@ class LutOutput(unittest.TestCase):
                 self.assertEqual(hashlib.sha256(output.encode()).hexdigest(), expected)
 
 
-class NativeLut(unittest.TestCase):
+class NativeLut(PluginTest):
     def test_native_output_matches_both_transfers_and_white_points(self):
         with patch.object(M, '_native_lut_python', return_value=sys.executable), patch.object(M, '_lut_writes_disabled', False):
             for encoding, white in (('pq', V.D65), ('g22', V.D65), ('g22', (.30, .32))):
@@ -298,10 +333,22 @@ class NativeLut(unittest.TestCase):
     def test_platform_selection_preserves_ordinary_steamos(self):
         def elf(machine):
             return b'\x7fELF\x02\x01' + bytes(12) + machine.to_bytes(2, 'little')
+        self.addCleanup(M._interpreter_headers.cache_clear)  # leave no fake headers behind
         with patch.object(M.sys, 'frozen', True, create=True):
             for native, loader, expected in ((183, 62, '/proc/self/root/usr/bin/python3'), (62, 62, None), (183, 183, None)):
+                M._interpreter_headers.cache_clear()  # cached in the plugin; each case reads afresh
                 with patch('builtins.open', side_effect=[io.BytesIO(elf(native)), io.BytesIO(elf(loader))]):
                     self.assertEqual(M._native_lut_python(), expected)
+
+    def test_a_passing_read_error_is_not_remembered(self):
+        M._interpreter_headers.cache_clear()
+        self.addCleanup(M._interpreter_headers.cache_clear)
+        arm = b'ELF' + bytes(12) + (183).to_bytes(2, 'little')
+        x86 = b'ELF' + bytes(12) + (62).to_bytes(2, 'little')
+        with patch('builtins.open', side_effect=[OSError(24, "Too many open files"),
+                                                 io.BytesIO(arm), io.BytesIO(x86)]):
+            self.assertIsNone(M._native_lut_python())
+            self.assertEqual(M._native_lut_python(), '/proc/self/root/usr/bin/python3')
 
     def test_native_worker_is_killed_and_reaped_on_cancel(self):
         worker = MagicMock()
@@ -356,7 +403,7 @@ class NativeLut(unittest.TestCase):
         worker.communicate.assert_called_once_with()
 
 
-class CompletedSlots(unittest.TestCase):
+class CompletedSlots(PluginTest):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)

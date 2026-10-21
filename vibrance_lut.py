@@ -288,9 +288,12 @@ def _prepared_grid(size, encoding, source_white, cancelled):
     return nodes
 
 
-def generate(saturation: float, size: int = 33, encoding: str = "pq",
-             source_white=D65, *, cancelled=lambda: False) -> str:
-    """A complete .cube file as text. R changes fastest, as gamescope expects."""
+def validate(saturation, size, encoding, source_white) -> None:
+    """Raise ValueError for any request generate() would refuse.
+
+    main.py checks with this before handing a build to the native worker, so
+    a bad request fails in-process rather than as a subprocess error.
+    """
     if not isinstance(size, int) or isinstance(size, bool) or not 2 <= size <= 128:
         raise ValueError("gamescope accepts LUT_3D_SIZE between 2 and 128")
     if encoding not in TRANSFERS:
@@ -298,6 +301,12 @@ def generate(saturation: float, size: int = 33, encoding: str = "pq",
     saturate((0, 0, 0), saturation, encoding, source_white)
     if encoding == "g22":
         _white_xyz(source_white)
+
+
+def generate(saturation: float, size: int = 33, encoding: str = "pq",
+             source_white=D65, *, cancelled=lambda: False) -> str:
+    """A complete .cube file as text. R changes fastest, as gamescope expects."""
+    validate(saturation, size, encoding, source_white)
     grid = None if saturation == 1 else _prepared_grid(size, encoding, source_white, cancelled)
     transform = _output_transform(encoding, source_white)
 

@@ -19,6 +19,8 @@ DISPLAYID_CTA_DATA_BLOCK = 0x81
 CTA_EXTENDED_TAG = 0x07
 CTA_HDR_STATIC_METADATA = 0x06
 EOTF_PQ_BIT = 1 << 2
+# gamescope's displaycolorimetry_709, used when an EDID has no chromaticity.
+REC709_RED = (0.640, 0.330)
 
 
 def valid(blob) -> bool:
@@ -31,22 +33,29 @@ def valid(blob) -> bool:
 
 
 def red_primary(blob: bytes):
-    """Red x,y from the base EDID chromaticity block, or None.
+    """Red x,y as gamescope uses it from the EDID, or None when unreadable.
 
     Byte 0x19 carries the low two bits of each of the first four coordinates in
     its own pairs of bits; 0x1B and 0x1C carry the high eight of red x and y.
+    A red x of zero means the EDID carries no colorimetry, and gamescope then
+    assumes Rec.709 (DRMBackend.cpp), so that is what the wide-gamut test sees.
     """
     if not valid(blob):
         return None
     low = blob[0x19]
     red_x = ((blob[0x1B] << 2) | (low >> 6)) / 1024.0
     red_y = ((blob[0x1C] << 2) | ((low >> 4) & 0x03)) / 1024.0
-    return (red_x, red_y) if red_x > 0 and red_y > 0 and red_x + red_y <= 1 else None
+    if red_x == 0:
+        return REC709_RED
+    return red_x, red_y  # gamescope takes any other value as it is
 
 
 def white_point(blob):
-    """Native white used by gamescope's SDR source, with a D65 fallback."""
-    if not valid(blob):
+    """Native white used by gamescope's SDR source, with a D65 fallback.
+
+    Without colorimetry (red x of zero) gamescope uses Rec.709, white and all.
+    """
+    if not valid(blob) or not (blob[0x1B] or blob[0x19] >> 6):  # red x is zero
         return D65
     low = blob[0x1A]
     x = ((blob[0x21] << 2) | ((low >> 2) & 3)) / 1024.0
@@ -57,9 +66,8 @@ def white_point(blob):
 
 
 def _cta_collection_pq(block: bytes, start: int, end: int):
-    """Walk a run of CTA-861 data blocks. None means "not in this one"."""
+    """Whether a run of CTA-861 data blocks advertises PQ."""
     pos = start
-    found = None
     while pos < end:
         length = block[pos] & 0x1F
         if length == 0:
@@ -71,9 +79,8 @@ def _cta_collection_pq(block: bytes, start: int, end: int):
                 raise ValueError("truncated HDR static metadata")
             if block[pos + 2] & EOTF_PQ_BIT:
                 return True
-            found = False
         pos += 1 + length
-    return found
+    return False
 
 
 def _displayid_pq(block: bytes):
@@ -87,7 +94,6 @@ def _displayid_pq(block: bytes):
     pos, end = 5, 5 + payload_length
     if end > 127:
         raise ValueError("truncated DisplayID payload")
-    result = None
     while pos + 2 < end:
         tag, body_length = block[pos], block[pos + 2]
         if tag == 0 and body_length == 0:
@@ -95,14 +101,11 @@ def _displayid_pq(block: bytes):
         body = pos + 3
         if body + body_length > end:
             raise ValueError("truncated DisplayID data block")
-        if tag == DISPLAYID_CTA_DATA_BLOCK:
-            found = _cta_collection_pq(block, body, min(body + body_length, end))
-            if found is True:
-                return True
-            if found is False:
-                result = False
+        if tag == DISPLAYID_CTA_DATA_BLOCK and _cta_collection_pq(
+                block, body, min(body + body_length, end)):
+            return True
         pos = body + body_length
-    return result
+    return False
 
 
 def supports_pq(blob: bytes):
@@ -123,7 +126,7 @@ def supports_pq(blob: bytes):
         return None
     for index in range(1, blob[126] + 1):
         block = blob[128 * index:128 * (index + 1)]
-        found = None
+        found = False
         try:
             if block[0] == CTA_EXTENSION_TAG:
                 # CTA-861 says d=0 means no data blocks, but a panel that lists
@@ -137,6 +140,6 @@ def supports_pq(blob: bytes):
                 found = _displayid_pq(block)
         except ValueError:
             return None
-        if found is True:
+        if found:
             return True
     return False

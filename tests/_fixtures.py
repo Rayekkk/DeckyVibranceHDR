@@ -21,6 +21,9 @@ _harness.install()
 
 import main as M  # noqa: E402
 
+# Never the machine's own panel: a laptop running the suite has an eDP EDID.
+M.DRM_SYSFS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-such-drm")
+
 # Unpatched originals, captured at import before any test replaces them.
 READ_STRING_ATOM = M._read_string_atom
 SAVE_SETTINGS = M.Plugin._save
@@ -61,7 +64,55 @@ def edid_with_red(red_x: float, red_y: float) -> bytes:
     return _harness.valid_edid(blob)
 
 
-class PluginCase(unittest.IsolatedAsyncioTestCase):
+def _snapshot(namespace):
+    """Every attribute of a class or module, and the contents of its dicts and lists."""
+    entries = {key: value for key, value in vars(namespace).items()
+               if not (key.startswith("__") and key.endswith("__"))}
+    contents = {key: (dict(value) if isinstance(value, dict) else list(value))
+                for key, value in entries.items() if isinstance(value, (dict, list))}
+    return namespace, entries, contents
+
+
+def _restore(snapshot):
+    namespace, entries, contents = snapshot
+    for key in [k for k in vars(namespace) if k not in entries
+                and not (k.startswith("__") and k.endswith("__"))]:
+        delattr(namespace, key)
+    for key, value in entries.items():
+        if key in contents:
+            value.clear()
+            value.update(contents[key]) if isinstance(value, dict) else value.extend(contents[key])
+        if vars(namespace).get(key) is not value:
+            setattr(namespace, key, value)
+
+
+class StateGuard:
+    """Undo whatever a test leaves on Plugin or in main's globals.
+
+    Plugin keeps its state on the class and main in module globals, so a test
+    that forgets to put one back changes the next test's starting point and
+    makes results depend on order. Wrapping run() covers setUp, the test and
+    every cleanup, whatever a subclass does or forgets to do.
+
+    It restores the attributes themselves and the contents of dicts and lists
+    held directly in them, not deeper objects they point to: the stand-in
+    settings manager's store, for one, is still reset by the tests using it.
+    """
+
+    def run(self, result=None):
+        saved = [_snapshot(M.Plugin), _snapshot(M)]
+        try:
+            return super().run(result)
+        finally:
+            for snapshot in saved:
+                _restore(snapshot)
+
+
+class PluginTest(StateGuard, unittest.TestCase):
+    """A synchronous test whose changes to Plugin and main are undone."""
+
+
+class PluginCase(StateGuard, unittest.IsolatedAsyncioTestCase):
     """A ready Plugin on the built-in panel with every external effect faked."""
 
     def setUp(self):
@@ -77,7 +128,7 @@ class PluginCase(unittest.IsolatedAsyncioTestCase):
         for key, value in dict(
             _state=state, _mutation_lock=asyncio.Lock(), _tasks=[],
             _unloading=False, _disconnected=False, _session_identity=None, _workers={}, _jobs={}, _due={},
-            _settings_dirty=False, _settings_loaded=True, _other_writer=False, _sdr_baseline=0.4, _last_sdr_written=None,
+            _settings_dirty=False, _settings_loaded=True, _foreign_sdr_seen=None, _foreign_active_ticks=0, _look_failures={"sdr": 0, "hdr": 0}, _sdr_baseline=0.4, _last_sdr_written=None, _last_sdr_attempted=None,
             _resume_event=None, _reassert_generation=0,
             _sdr_look_path=None, _hdr_look_path=None,
             _sdr_look_baseline=None, _hdr_look_baseline=None,
@@ -90,9 +141,10 @@ class PluginCase(unittest.IsolatedAsyncioTestCase):
         self.mock(M, "_xprop_timeout", 3.0)
         self.mock(M, "DEBOUNCE_S", 0)
         self.mock(M, "SDR_COALESCE_S", 0)
+        self.mock(M, "SETTINGS_RETRY_S", 0.01)
         self.mock(M, "SDR_NEUTRAL_ATOM", 1.0)
         self.mock(M, "SDR_ATOM_SPAN", 2.0)
-        self.mock(M, "_other_writer_present", return_value=False)
+        self.mock(M, "_foreign_sdr_values", return_value=())
         self.live_sdr = 0.8
         self.strings = {}
         self.float_writer = self.mock(M, "_write_float_atom", side_effect=self.write_float)
@@ -101,6 +153,8 @@ class PluginCase(unittest.IsolatedAsyncioTestCase):
         self.mock(M, "_read_string_atom", side_effect=lambda atom: self.strings.get(atom))
         self.mock(M.os.path, "isfile", return_value=True)
         self.mock(M.os.path, "exists", return_value=True)
+        # The fake builder's files live here, so the plugin knows them as its own.
+        self.mock(M, "_runtime_dir", return_value="/tmp")
         self.builder = self.mock(M, "_write_look", side_effect=lambda value, slot, *args:
                                  f"/tmp/{'sdr' if args and args[0] == 'g22' else 'hdr'}-look-{slot}.cube")
 

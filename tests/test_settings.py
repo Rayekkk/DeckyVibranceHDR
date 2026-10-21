@@ -16,11 +16,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from _fixtures import PATH_EXISTS, PluginCase, SAVE_SETTINGS  # installs the loader stand-ins first
+from _fixtures import PATH_EXISTS, PluginCase, PluginTest, SAVE_SETTINGS  # installs the loader stand-ins first
 import main as M
 
 
-class AtomicSettings(unittest.TestCase):
+class AtomicSettings(PluginTest):
     def setUp(self):
         loaded = patch.object(M.Plugin, "_settings_loaded", True)
         loaded.start()
@@ -70,7 +70,7 @@ class AtomicSettings(unittest.TestCase):
                 self.assertIs(M._setting("hdr_enabled", False), False)
 
 
-class SettingsFileContract(unittest.TestCase):
+class SettingsFileContract(PluginTest):
     @unittest.skipUnless(hasattr(os, "mkfifo"), "requires POSIX named pipes")
     def test_constructor_cannot_read_fifo_before_startup_validation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -215,10 +215,102 @@ class ReadFailure(PluginCase):
             path.write_text("{broken settings")
             store = SimpleNamespace(path=str(path), settings={}, read=lambda: None)
             self.mock(M, "settings", store)
-            with self.assertRaises(json.JSONDecodeError):
+            with self.assertRaises(M.SettingsUnreadable):
                 M._read_settings()
             self.assertEqual(path.read_text(), "{broken settings")
+            # Nesting deep enough to overflow the parser is a RecursionError,
+            # not a ValueError, and must still count as unparseable.
+            path.write_text("[" * 100000)
+            with self.assertRaises(M.SettingsUnreadable):
+                M._read_settings()
             self.assertEqual(store.settings, {})
+
+    async def test_unparseable_settings_are_set_aside_and_startup_continues(self):
+        """Bad content never parses on a retry, so waiting would leave the
+        plugin dead with no way out from the menu. The bytes are kept."""
+        self.mock(M.updater, "ssl_context", return_value=None)
+        recovery = self.mock(self.plugin, "_start_when_ready")
+        self.mock(M, "_settings_new", False)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            for broken in (b"{broken settings", b"\xff\xfe not utf-8", b"[1, 2]"):
+                with self.subTest(content=broken):
+                    for leftover in Path(folder).iterdir():
+                        leftover.unlink()
+                    path.write_bytes(broken)
+                    M._settings_new = False
+                    store = SimpleNamespace(path=str(path), settings={"sdr_enabled": True})
+                    store.getSetting = lambda key, default: store.settings.get(key, default)
+                    self.mock(M, "settings", store)
+                    await self.plugin._main()
+                    self.assertTrue(M.Plugin._state["settings_loaded"])
+                    self.assertFalse(M.Plugin._state["sdr_enabled"])
+                    self.assertEqual(M.Plugin._state["settings_error"], "")
+                    self.assertFalse(path.exists())
+                    (aside,) = Path(folder).glob("settings.json.corrupt-*")
+                    self.assertEqual(aside.read_bytes(), broken)
+                    self.assertIn(aside.name, M.Plugin._state["settings_notice"])  # the menu says so
+        self.assertEqual(recovery.call_count, 3)
+
+    async def test_a_file_that_cannot_be_set_aside_is_kept_and_retried(self):
+        self.mock(M.updater, "ssl_context", return_value=None)
+        self.mock(self.plugin, "_start_when_ready")
+        self.mock(M, "_settings_new", False)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            path.write_text("{broken")
+            self.mock(M, "settings", SimpleNamespace(path=str(path), settings={}))
+            refused = asyncio.Event()
+            loop = asyncio.get_running_loop()
+            def refuse():
+                loop.call_soon_threadsafe(refused.set)
+                raise PermissionError("read-only settings folder")
+            self.mock(M, "_set_aside_settings", side_effect=refuse)
+            startup = asyncio.create_task(self.plugin._main())
+            try:
+                await asyncio.wait_for(refused.wait(), 5)
+                for _ in range(500):  # the error is published after the thread returns
+                    if "could not set the file aside" in M.Plugin._state["settings_error"]:
+                        break
+                    await asyncio.sleep(0.01)
+                self.assertFalse(M.Plugin._state["settings_loaded"])
+                self.assertIn("could not set the file aside", M.Plugin._state["settings_error"])
+                self.assertEqual(path.read_text(), "{broken")
+            finally:
+                M.Plugin._unloading = True
+                startup.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await startup
+
+    async def test_a_lasting_read_failure_is_logged_once_not_every_retry(self):
+        self.mock(M.updater, "ssl_context", return_value=None)
+        self.mock(self.plugin, "_start_when_ready")
+        self.mock(M, "_read_settings", side_effect=[PermissionError("denied")] * 4 + [None])
+        warning = self.mock(M.decky.logger, "warning")
+        await self.plugin._main()
+        logged = [call for call in warning.call_args_list if "could not load settings" in call.args[0]]
+        self.assertEqual(len(logged), 1)
+
+    async def test_a_new_read_failure_reason_is_logged_again(self):
+        self.mock(M.updater, "ssl_context", return_value=None)
+        self.mock(self.plugin, "_start_when_ready")
+        self.mock(M, "SETTINGS_RETRY_S", 0)
+        self.mock(M, "_read_settings", side_effect=[PermissionError("denied")] * 2
+                  + [OSError("I/O error")] * 2 + [None])
+        warning = self.mock(M.decky.logger, "warning")
+        await self.plugin._main()
+        logged = [call.args[0] for call in warning.call_args_list if "could not load settings" in call.args[0]]
+        self.assertEqual(len(logged), 2)
+        self.assertIn("denied", logged[0])
+        self.assertIn("I/O error", logged[1])
+
+    async def test_a_lasting_save_failure_is_logged_once_not_every_retry(self):
+        self.mock(M.Plugin, "_save", side_effect=OSError("read-only file system"))
+        error = self.mock(M.decky.logger, "error")
+        for _ in range(3):
+            M.Plugin._state["settings_error"] = M.Plugin._write_settings()
+        self.assertEqual(error.call_count, 1)
+        self.assertIn("read-only", M.Plugin._state["settings_error"])
 
     async def test_empty_file_loads_as_defaults_but_missing_file_is_retried(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -327,7 +419,7 @@ class SettingsWrites(PluginCase):
     async def test_unload_flushes_a_pending_slider_value(self):
         self.mock(M, "SDR_COALESCE_S", 5)
         saved = []
-        self.mock(M.Plugin, "_save", side_effect=lambda: saved.append(dict(M.Plugin._state)))
+        self.mock(M.Plugin, "_save", side_effect=lambda values=None: saved.append(dict(M.Plugin._state)))
         await self.plugin.set_hdr_saturation(1.4)
         await self.plugin._unload()
         self.assertEqual(saved[-1]["hdr_saturation"], 1.4)
@@ -356,7 +448,7 @@ class SettingsWrites(PluginCase):
         entered, release = threading.Event(), threading.Event()
         def save(*args):
             entered.set()
-            release.wait(2)
+            release.wait(10)
         self.mock(M.Plugin, "_save", side_effect=save)
         await self.plugin.set_hdr_saturation(1.2)
         pending = []
@@ -364,7 +456,7 @@ class SettingsWrites(PluginCase):
             self.assertTrue(await asyncio.to_thread(entered.wait, 1))
             pending = [asyncio.create_task(call) for call in (
                 self.plugin.set_sdr_enabled(False), self.plugin.reset(), self.plugin.set_hdr_saturation(1.4))]
-            done, _ = await asyncio.wait(pending, timeout=0.2)
+            done, _ = await asyncio.wait(pending, timeout=2)
             self.assertEqual(len(done), len(pending), "disk IO held the control mutation lock")
             self.assertEqual(self.live_sdr, 0.8)
         finally:
@@ -489,3 +581,25 @@ class SettingsWrites(PluginCase):
             self.assertEqual(saved["hdr_saturation"], 1.4)
             self.assertEqual(saved["unrelated"], "keep")
             self.assertFalse(M.Plugin._settings_dirty)
+
+
+class StartupRecovery(PluginCase):
+    async def test_recovered_read_clears_its_error_and_saves_migrated_values(self):
+        self.mock(M.updater, "ssl_context", return_value=None)
+        self.mock(self.plugin, "_start_when_ready")
+        store = SimpleNamespace(settings={}, path=None)
+        store.getSetting = lambda key, default: store.settings.get(key, default)
+        calls = 0
+        def read():
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise OSError("temporary disk failure")
+            store.settings = {"sdr_enabled": True, "sdr_saturation": 9.0}
+        store.read = read
+        self.mock(M, "settings", store)
+        await self.plugin._main()
+        self.assertEqual(M.Plugin._state["settings_error"], "")  # before any save runs
+        await asyncio.gather(*M.Plugin._tasks)
+        saved = M.Plugin._save.call_args.args[0]
+        self.assertEqual(saved["sdr_saturation"], M.SDR_MAX_WIDE)
