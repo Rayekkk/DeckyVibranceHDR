@@ -88,7 +88,7 @@ class Clamping(PluginTest):
 
 
 class Setters(PluginTest):
-    """_clamp is exercised above in isolation; this is about its call sites.
+    """clamp is exercised above in isolation; this is about its call sites.
 
     Passing one half's bounds to the other half's setter is a single-token slip
     that nothing else in this file would notice.
@@ -1042,10 +1042,10 @@ class SdrRewrite(PluginCase):
 
 
 class LookReleaseGaps(PluginCase):
-    """T1: two lines in the look ownership code that no existing test fails without."""
+    """Two lines of look ownership that nothing else would notice going missing."""
 
     async def test_a_look_that_replaced_ours_is_restored_after_we_go_off_and_on(self):
-        # _release_look's "somebody else replaced us" branch must keep their look
+        # release_look's "somebody else replaced us" branch must keep their look
         # as the baseline; later reads can fail and never learn it again.
         other = "/opt/other/look.cube"
         M.state.public.update(hdr_enabled=True, hdr_saturation=1.3, hdr_applied=True,
@@ -1091,7 +1091,7 @@ class HdrLookStuckAfterPanelLosesPq(PluginCase):
         that only became readable later, say). _apply_both releases the look
         once; if that write fails nothing retries it - the slow tick only
         retries while hdr_enabled is False, _retry_pending_looks and the
-        reassert skip a half that is not _look_enabled, and the panel cache is
+        reassert skip a half that is not look_enabled, and the panel cache is
         complete - and the frontend hides the HDR toggle, so the saturated
         look stays on screen until Reset or reload.
         """
@@ -1138,7 +1138,7 @@ class LookBuildFailureLogging(PluginCase):
 
 
 class RpcSurface(PluginCase):
-    """The frontend's own reads; every other suite reads Plugin._state directly."""
+    """The frontend's own reads; every other suite reads state.public directly."""
 
     async def test_reads_answer_with_a_copy_of_the_state_the_version_and_the_download(self):
         state = await self.plugin.get_state()
@@ -1311,3 +1311,177 @@ class LookFailureLogEdges(PluginCase):
         logged = [c.args[0] for c in error.call_args_list if "could not write look" in c.args[0]]
         self.assertEqual(len(logged), 2, logged)
         self.assertEqual(sum("hdr-look" in line for line in logged), 1, logged)
+
+
+class InvalidatedBuildClearsBuilding(PluginCase):
+    """A build superseded by a disconnect never clears its own flag (its token
+    is stale), so the invalidation must; otherwise the menu says "building"
+    forever and _retry_pending_looks skips the half after a preserved reconnect."""
+
+    async def check(self, component, flag):
+        self.mock(M, "DEBOUNCE_S", 0.05)
+        self.plugin._schedule_look(component)
+        self.assertTrue(M.state.public[flag])
+        M.Plugin._disconnect()
+        await self.drain()
+        self.assertFalse(M.state.public[flag])
+        M.state.disconnected = False                 # same session comes back
+        self.plugin._retry_pending_looks(component)
+        await self.drain()
+        self.assertTrue(self.builder.called)
+
+    async def test_hdr(self):
+        M.state.public.update(hdr_enabled=True, hdr_saturation=1.3)
+        await self.check("hdr", "generating")
+
+    async def test_sdr(self):
+        M.vibrance_panel.use_mapping(False)          # standard panel: the look carries 250%
+        M.state.public.update(sdr_enabled=True, sdr_saturation=2.5)
+        await self.check("sdr", "sdr_generating")
+
+
+class SwitchingOffWhileDocked(PluginCase):
+    """A switch-off queued behind a slow request can land after docking; it
+    must still switch the half off, or undocking brings the effect back."""
+
+    async def test_both_halves_switch_off_while_docked(self):
+        M.state.public.update(sdr_enabled=True, hdr_enabled=True, external_display=True)
+        await self.plugin.set_sdr_enabled(False)
+        await self.plugin.set_hdr_enabled(False)
+        self.assertFalse(M.state.public["sdr_enabled"])
+        self.assertFalse(M.state.public["hdr_enabled"])
+
+
+class TrackedTaskLogging(PluginCase):
+    """Only a task that really failed is logged: not every finished slider job,
+    and a cancelled one must not raise inside the done callback."""
+
+    async def test_only_a_failed_task_is_logged(self):
+        error = self.mock(M.decky.logger, "error")
+        raised = []
+        asyncio.get_running_loop().set_exception_handler(lambda _loop, context: raised.append(context))
+        async def fine(): return 1
+        async def broken(): raise OSError("boom")
+        async def stuck(): await asyncio.sleep(10)
+        tasks = [asyncio.create_task(c()) for c in (fine, broken, stuck)]
+        for task in tasks:
+            M.Plugin._track(task)
+        tasks[2].cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.sleep(0)                                   # done callbacks
+        logged = [c.args[0] for c in error.call_args_list]
+        self.assertEqual(len(logged), 1, logged)
+        self.assertIn("boom", logged[0])
+        self.assertEqual(M.state.tasks, [])
+        self.assertEqual(raised, [])                             # no error inside the callback
+
+
+class SdrApplyCrashIsShown(PluginCase):
+    async def test_an_sdr_write_that_raises_is_reported_in_the_menu(self):
+        M.state.public.update(sdr_enabled=True, sdr_applied=True)
+        self.mock(M.vibrance_effects, "apply_sdr", side_effect=OSError("xprop vanished"))
+        await self.plugin.set_sdr_saturation(1.6)
+        await self.drain()
+        self.assertIn("could not apply SDR: xprop vanished", M.state.public["sdr_error"])
+
+
+class LookCrashIsCountedAndShown(PluginCase):
+    async def test_a_look_commit_that_raises_is_reported_and_counted(self):
+        M.state.public.update(hdr_enabled=True)
+        self.mock(M.vibrance_effects, "commit_look", side_effect=OSError("xprop vanished"))
+        await self.plugin.set_hdr_saturation(1.3)
+        await self.drain()
+        self.assertIn("could not apply the HDR LUT: xprop vanished", M.state.public["hdr_error"])
+        self.assertEqual(M.state.look_failures["hdr"], 1)
+        self.assertFalse(M.state.public["generating"])
+
+
+class FreshState(PluginTest):
+    """StateGuard calls state.reset() on the one long-lived object, so a field
+    reset() forgot keeps the previous test's value and every suite still passes;
+    a fresh process (Decky starts one per load) would then raise AttributeError."""
+
+    def test_a_fresh_state_has_every_field_the_plugin_reads(self):
+        import ast, inspect
+        fresh = M.vibrance_state.PluginState()
+        used = {name for look in M.vibrance_effects.LOOKS.values()
+                for key, name in look.items() if key in ("path", "baseline", "slot", "generation")}
+        for module in (M, M.vibrance_effects, M.vibrance_panel):
+            for node in ast.walk(ast.parse(inspect.getsource(module))):
+                if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
+                        and node.value.id == "state" and not callable(getattr(type(fresh), node.attr, None))):
+                    used.add(node.attr)
+        self.assertEqual(sorted(name for name in used if not hasattr(fresh, name)), [])
+
+    def test_a_fresh_state_is_a_reset_one(self):
+        fresh, reset = M.vibrance_state.PluginState(), M.vibrance_state.PluginState()
+        reset.public["ready"] = True
+        reset.reset()
+        self.assertEqual(fresh.public, reset.public)
+        self.assertFalse(fresh.public["ready"])
+
+    def test_restore_needs_a_matching_session_once_one_is_known(self):
+        with patch.object(M.vibrance_x11, "session_identity", return_value=(":0", (1, 1))):
+            fresh = M.vibrance_state.PluginState()
+            self.assertTrue(fresh.can_restore_session())        # nothing known, connected
+            fresh.disconnected = True
+            self.assertFalse(fresh.can_restore_session())
+            fresh.session_identity = (":0", (1, 1))
+            self.assertTrue(fresh.can_restore_session())
+            fresh.session_identity = (":0", (2, 2))
+            self.assertFalse(fresh.can_restore_session())
+
+
+class EffectsReporting(PluginCase):
+    async def test_a_failed_sdr_write_is_shown(self):
+        M.state.public.update(sdr_enabled=True)
+        self.float_writer.side_effect = lambda atom, value: False
+        M.vibrance_effects.apply_sdr()
+        self.assertEqual(M.state.public["sdr_error"], "could not write SDR to gamescope")
+        self.assertFalse(M.state.public["sdr_applied"])
+
+    async def test_switching_off_after_another_writer_took_over_forgets_our_values(self):
+        M.state.public.update(sdr_enabled=True, sdr_applied=True, sdr_error="old trouble")
+        M.state.last_sdr_written = M.state.last_sdr_attempted = 1.5
+        self.live_sdr = 0.7                                    # somebody else's now
+        await self.plugin.set_sdr_enabled(False)
+        self.assertEqual(self.live_sdr, 0.7)
+        self.assertFalse(M.state.public["sdr_applied"])
+        self.assertIsNone(M.state.last_sdr_written)
+        self.assertIsNone(M.state.last_sdr_attempted)
+        self.assertEqual(M.state.public["sdr_error"], "")
+        await self.plugin.set_sdr_enabled(True)                # their value is the new baseline
+        self.assertEqual(M.state.sdr_baseline, 0.7)
+
+    async def test_releasing_nothing_on_a_replaced_server_does_not_wait(self):
+        M.state.session_identity = (":0", (1, 1))
+        self.mock(M.vibrance_x11, "session_identity", return_value=(":0", (2, 2)))
+        M.state.public.update(sdr_enabled=False, sdr_applied=False)
+        M.vibrance_effects.release_sdr()
+        self.assertEqual(M.state.public["sdr_error"], "")
+
+    async def test_a_look_waiting_for_a_replaced_server_says_so(self):
+        M.state.session_identity = (":0", (1, 1))
+        self.mock(M.vibrance_x11, "session_identity", return_value=(":0", (2, 2)))
+        M.state.public.update(hdr_enabled=True, hdr_saturation=1.3)
+        M.vibrance_effects.commit_look("hdr", "/tmp/hdr-look-1.cube", 1, 1.3)
+        self.assertIn("waiting for gamescope", M.state.public["hdr_error"])
+        M.state.public["hdr_error"] = ""
+        M.vibrance_effects.reapply_look("hdr", "/tmp/hdr-look-1.cube", None)
+        self.assertIn("waiting for gamescope", M.state.public["hdr_error"])
+        self.string_writer.assert_not_called()
+
+    async def test_a_look_still_in_place_is_not_rewritten_on_the_slow_tick(self):
+        M.state.public.update(hdr_enabled=True, hdr_saturation=1.3, hdr_applied=True)
+        M.state.hdr_look_path = self.strings[M.vibrance_x11.ATOM_LOOK_PQ] = "/tmp/hdr-look-1.cube"
+        M.vibrance_effects.reassert_looks_if_dropped()
+        self.string_writer.assert_not_called()                # a rewrite makes gamescope reload it
+
+    async def test_going_neutral_forgets_the_last_lut_sent(self):
+        M.state.public.update(hdr_enabled=True, hdr_saturation=1.3)
+        await self.plugin.set_hdr_saturation(1.3)
+        await self.drain()
+        self.assertEqual(M.state.public["hdr_applied_saturation"], 1.3)
+        await self.plugin.set_hdr_saturation(1.0)
+        await self.drain()
+        self.assertIsNone(M.state.public["hdr_applied_saturation"])   # not "Last LUT sent: 130%"

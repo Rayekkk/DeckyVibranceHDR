@@ -109,6 +109,10 @@ def version_key(text: str):
             tuple((0, int(part)) if part.isdigit() else (1, part) for part in identifiers))
 
 
+# Where downloads go when no desktop user can be found (SteamOS's own).
+FALLBACK_DOWNLOADS = "/home/deck/Downloads"
+
+
 def real_user() -> pwd.struct_passwd | None:
     """Use Decky's host user; privileged plugins cannot use '~' as a fallback."""
     username = os.environ.get("DECKY_USER")
@@ -416,7 +420,7 @@ class Updater:
                 raise ValueError("check for updates before downloading this release asset")
             user = real_user()
             as_root = hasattr(os, "geteuid") and os.geteuid() == 0
-            downloads_dir = xdg_download_dir(user.pw_dir) if user else "/home/deck/Downloads"
+            downloads_dir = xdg_download_dir(user.pw_dir) if user else FALLBACK_DOWNLOADS
             if as_root and user:
                 # user-dirs.dirs belongs to the user. Root must not create, and
                 # then hand over, a directory it names anywhere else - nor

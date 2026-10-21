@@ -12,6 +12,7 @@ writes and LUT builds are all faked in memory.
 import asyncio
 import os
 import sys
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -23,6 +24,10 @@ import main as M  # noqa: E402
 
 # Never the machine's own panel: a laptop running the suite has an eDP EDID.
 M.vibrance_host.DRM_SYSFS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-such-drm")
+# Nor a real Downloads folder: an updater test that loses its stand-in user
+# would otherwise write into the host's /home/deck/Downloads.
+import lego_updater  # noqa: E402
+lego_updater.FALLBACK_DOWNLOADS = os.path.join(tempfile.gettempdir(), "dvh-tests-no-such-downloads")
 # Nor its X servers: a desktop session's sockets would answer real xprop calls.
 M.vibrance_x11.SOCKET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-such-x11")
 
@@ -88,6 +93,18 @@ def _restore(snapshot):
             setattr(namespace, key, value)
 
 
+def _fresh_state():
+    """A state as a new Decky process builds it: every field gone, then reset().
+
+    Clearing first means a field reset() forgets fails loudly instead of
+    keeping the previous test's value.
+    """
+    for name in type(M.state).__slots__:
+        if hasattr(M.state, name):
+            delattr(M.state, name)
+    M.state.reset()
+
+
 class StateGuard:
     """Start each test from a fresh plugin state and undo what it patches.
 
@@ -107,13 +124,13 @@ class StateGuard:
                  _snapshot(M.vibrance_x11), _snapshot(M.vibrance_host),
                  _snapshot(M.vibrance_settings), _snapshot(M.vibrance_effects),
                  _snapshot(M.vibrance_panel), _snapshot(M.vibrance_state), _snapshot(M.updater)]
-        M.state.reset()
+        _fresh_state()
         try:
             return super().run(result)
         finally:
             for snapshot in saved:
                 _restore(snapshot)
-            M.state.reset()
+            _fresh_state()
 
 
 class PluginTest(StateGuard, unittest.TestCase):

@@ -1056,24 +1056,25 @@ class Plugin:
             vibrance_lutfile.disabled = True
             Plugin._invalidate_sdr_jobs()
             Plugin._invalidate_hdr_jobs()
-        for task in list(state.tasks):
-            task.cancel()
-        if state.tasks:
-            await asyncio.wait(list(state.tasks), timeout=0.1)
-        state.tasks = []
-        async with state.mutation_lock:
-            # Different atoms, and the disk does not wait on X: restore both
-            # halves and flush the desired values side by side, so a slow X
-            # server cannot push the save past Decky's stop budget. The flush
-            # covers edits whose debounce has not run yet. Before startup has
-            # read the file the class defaults are not the user's settings,
-            # so a quick unload leaves it intact.
-            jobs = [_offload(vibrance_effects.release_sdr), _offload(vibrance_effects.release_look, "hdr")]
-            if state.settings_loaded:
-                jobs.append(_offload(Plugin._persist))
-            for result in await asyncio.gather(*jobs, return_exceptions=True):
-                if isinstance(result, Exception):
-                    decky.logger.error(f"{LOG} unload step failed: {result}")
+            # From here on nothing gives the event loop back. Once Decky closes
+            # its end of the plugin socket, its listener in this process spins
+            # on the EOF without ever yielding, so anything awaited here would
+            # only end in the SIGKILL (seen on an Odin 3: Decky 3.3.0 under FEX;
+            # SteamDeckHomebrew/decky-loader issue 975).
+            # The settings go first: a reload cannot bring back an edit whose
+            # debounce has not run yet, and a slow X server must not hold them
+            # up. _persist leaves the file alone if startup has not read it.
+            for step in (Plugin._persist, vibrance_effects.release_sdr,
+                         lambda: vibrance_effects.release_look("hdr")):
+                try:
+                    step()
+                except Exception as exc:
+                    decky.logger.error(f"{LOG} unload step failed: {exc}")
+            # Cancelled while we hold the lock, a task cannot write after the
+            # restore: it meets the cancellation at its next await.
+            for task in state.tasks:
+                task.cancel()
+            state.tasks = []
         decky.logger.info(f"{LOG} unloaded")
 
     async def _uninstall(self):
@@ -1083,8 +1084,8 @@ class Plugin:
             await self._unload()
         # A cancelled executor call may still be finishing a file. Wait for the
         # writer lock after disabling new writes so nothing can recreate a LUT
-        # behind the cleanup pass.
-        await _offload(vibrance_lutfile.wait_for_writer)
+        # behind the cleanup pass. Not awaited, for the reason in _unload.
+        vibrance_lutfile.wait_for_writer()
         # The generated LUTs live outside the plugin directory the loader is
         # about to delete.
         for look in vibrance_effects.LOOKS.values():

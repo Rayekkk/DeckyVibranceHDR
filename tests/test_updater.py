@@ -696,3 +696,29 @@ class RealUserEdges(PluginTest):
                 self.assertIs(U.real_user(), me)
             with patch.object(U.os, "getuid", create=True, return_value=0):   # root: lowest desktop uid
                 self.assertIs(U.real_user(), other)
+
+
+class UnpinnedUpdaterGuards(PluginTest):
+    """Without asset_name (the shared module's other mode) nothing but these two
+    checks stands between the frontend's arguments and a write as root."""
+
+    def updater(self):
+        return U.Updater(releases_url=M.GITHUB_RELEASES_URL, user_agent="test", log_prefix="test",
+                         plugin_dir=M.PLUGIN_DIR, logger=M.decky.logger)
+
+    def test_a_download_url_off_github_is_refused_before_any_request(self):
+        updater = self.updater()
+        with patch.object(updater, "download_to") as fetch:
+            result = updater.download("https://evil.example/x.zip", "x.zip")
+        fetch.assert_not_called()
+        self.assertFalse(result["success"])
+        self.assertIn("untrusted host", result["error"])
+
+    def test_an_asset_name_that_leaves_the_download_folder_is_refused(self):
+        updater = self.updater()
+        url = "https://github.com/Rayekkk/DeckyVibranceHDR/releases/download/9.9.9/x.zip"
+        for name in ("../outside.zip", "a/b.zip", ".hidden.zip", "x.tar", 7):
+            with self.subTest(name=name), patch.object(updater, "download_to") as fetch:
+                result = updater.download(url, name)
+                fetch.assert_not_called()
+                self.assertEqual(result["error"], "invalid release asset filename")

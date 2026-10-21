@@ -936,3 +936,34 @@ class PanelTransitionEdges(PluginCase):
         await self.plugin._refresh_panel(probe)
         await self.drain()
         self.assertEqual((self.float_writer.call_count, self.string_writer.call_count), (floats, strings))
+
+
+class HdrSwitchedOffForAPanelWithoutPq(PluginCase):
+    async def test_the_switched_off_hdr_half_is_saved(self):
+        M.state.public.update(hdr_enabled=True, hdr_supported=False)
+        self.mock(M.vibrance_x11, "session_identity", return_value=None)
+        self.mock(M, "_pick_display", return_value=":0")
+        self.mock(M.vibrance_x11, "count_gamescope_atoms", return_value=44)
+        self.mock(M, "GAMESCOPE_SETTLE_S", 0)
+        self.mock(M.vibrance_panel, "configure_for_panel", return_value=True)
+        self.mock(M.vibrance_effects, "capture_existing_looks")
+        self.mock(self.plugin, "_reassert_repeatedly", return_value=None)
+        await self.plugin._start_when_ready(start_monitor=False)
+        await self.drain()
+        self.assertFalse(M.state.public["hdr_enabled"])
+        M.Plugin._save.assert_called()
+        self.assertFalse(M.Plugin._save.call_args.args[0]["hdr_enabled"])
+
+
+class MappingSwitchesBack(PluginTest):
+    """Every test starts on the wide mapping (reset()), so nothing checks that a
+    standard panel followed by a wide one gets the wide numbers back."""
+
+    def test_standard_then_wide_restores_the_wide_mapping(self):
+        M.vibrance_panel.use_mapping(False)
+        M.vibrance_panel.use_mapping(True)
+        fresh = M.vibrance_state.PluginState()
+        self.assertEqual((M.state.sdr_neutral_atom, M.state.sdr_atom_span),
+                         (fresh.sdr_neutral_atom, fresh.sdr_atom_span))
+        for key in ("sdr_max", "sdr_soft_limit"):
+            self.assertEqual(M.state.public[key], fresh.public[key])

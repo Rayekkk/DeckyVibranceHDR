@@ -71,6 +71,20 @@ class PluginState:
     load starts.
     """
 
+    # A misspelt field is an error, not a new attribute nobody reads.
+    __slots__ = (
+        'public', 'sdr_baseline', 'last_sdr_written', 'last_sdr_attempted',
+        'hdr_look_slot', 'hdr_generation', 'sdr_generation', 'sdr_look_slot',
+        'sdr_look_generation', 'sdr_look_path', 'sdr_look_baseline', 'sdr_white_point',
+        'hdr_look_path', 'hdr_look_baseline', 'reassert_strikes', 'slow_checks',
+        'panel_cache_key', 'panel_cache_complete', 'mutation_lock', 'unloading',
+        'tasks', 'workers', 'jobs', 'due',
+        'save_generation', 'settings_dirty', 'settings_loaded', 'foreign_sdr_seen',
+        'foreign_active_ticks', 'look_failures', 'disconnected', 'session_identity',
+        'connect_ours', 'reassert_generation', 'resume_event', 'sdr_neutral_atom',
+        'sdr_atom_span', 'display_scan_logged', 'look_errors_logged',
+    )
+
     def __init__(self):
         self.reset()
 
@@ -141,7 +155,7 @@ class PluginState:
         self.reassert_generation = 0
         self.resume_event = None
 
-        # The SDR mapping the panel takes (see _use_mapping); wide until known.
+        # The SDR mapping the panel takes (see vibrance_panel.use_mapping); wide until known.
         self.sdr_neutral_atom, self.sdr_atom_span = 1.0, 2.0
         self.display_scan_logged = None  # what _pick_display last logged
         self.look_errors_logged = {}     # LUT prefix -> build failure last logged
