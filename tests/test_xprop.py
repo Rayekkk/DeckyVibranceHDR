@@ -29,8 +29,8 @@ class AtomEncoding(PluginTest):
 
     def test_negative_values_use_the_unsigned_bit_pattern(self):
         # SDR_UNSET is written back to gamescope, and xprop's 32c is unsigned.
-        self.assertEqual(M.vibrance_x11.float_to_cardinal(M.SDR_UNSET), 0xBF800000)
-        self.assertEqual(M.vibrance_x11.cardinal_to_float(0xBF800000), M.SDR_UNSET)
+        self.assertEqual(M.vibrance_x11.float_to_cardinal(M.vibrance_effects.SDR_UNSET), 0xBF800000)
+        self.assertEqual(M.vibrance_x11.cardinal_to_float(0xBF800000), M.vibrance_effects.SDR_UNSET)
 
     def test_none_does_not_raise(self):
         self.assertIsNone(M.vibrance_x11.cardinal_to_float(None))
@@ -61,11 +61,11 @@ class XpropPaths(PluginTest):
                  ('"/tmp/kolory-Łódź.cube"', '/tmp/kolory-Łódź.cube')]
         for wire, expected in cases:
             with patch.object(M.vibrance_x11.subprocess, "run", return_value=SimpleNamespace(stdout="ATOM(UTF8_STRING) = " + wire)):
-                self.assertEqual(M.vibrance_x11.read_string_atom(M.ATOM_LOOK_G22), expected)
+                self.assertEqual(M.vibrance_x11.read_string_atom(M.vibrance_x11.ATOM_LOOK_G22), expected)
 
     def test_embedded_null_is_not_a_filename(self):
         with patch.object(M.vibrance_x11.subprocess, "run", return_value=SimpleNamespace(stdout=r'ATOM = "/tmp/a\000b"')):
-            self.assertIsNone(M.vibrance_x11.read_string_atom(M.ATOM_EDID_PATH))
+            self.assertIsNone(M.vibrance_x11.read_string_atom(M.vibrance_x11.ATOM_EDID_PATH))
 
 
 class AtomWrites(PluginTest):
@@ -90,16 +90,16 @@ class AtomWrites(PluginTest):
 
     def test_a_look_path_goes_out_as_utf8_unchanged(self):
         path = "/home/deck/.local/share/look dir/żółw.cube"
-        self.assertTrue(M.vibrance_x11.write_string_atom(M.ATOM_LOOK_PQ, path))
+        self.assertTrue(M.vibrance_x11.write_string_atom(M.vibrance_x11.ATOM_LOOK_PQ, path))
         self.assertEqual(self.run.call_args.args[0],
-                         ["xprop", "-root", "-f", M.ATOM_LOOK_PQ, "8u", "-set", M.ATOM_LOOK_PQ, path])
+                         ["xprop", "-root", "-f", M.vibrance_x11.ATOM_LOOK_PQ, "8u", "-set", M.vibrance_x11.ATOM_LOOK_PQ, path])
 
     def test_a_failing_or_hanging_xprop_is_a_failed_write(self):
         for failure in (M.vibrance_x11.subprocess.CalledProcessError(1, "xprop"),
                         M.vibrance_x11.subprocess.TimeoutExpired("xprop", 3), FileNotFoundError("xprop")):
             with self.subTest(failure=type(failure).__name__):
                 self.run.side_effect = failure
-                self.assertFalse(M.vibrance_x11.write_string_atom(M.ATOM_LOOK_G22, "/x.cube"))
+                self.assertFalse(M.vibrance_x11.write_string_atom(M.vibrance_x11.ATOM_LOOK_G22, "/x.cube"))
 
 
 class CrossServerWriter(PluginTest):
@@ -217,7 +217,7 @@ class DisplayChoice(PluginTest):
     def test_the_server_reporting_docking_wins_over_a_fuller_one(self):
         """IS_EXTERNAL exists only on gamescope's first server; reading it from
         another would see it absent and never stand down for a monitor."""
-        root = self.SECONDARY + f"\n{M.ATOM_IS_EXTERNAL}(CARDINAL) = 0"
+        root = self.SECONDARY + f"\n{M.vibrance_x11.ATOM_IS_EXTERNAL}(CARDINAL) = 0"
         self._serve({":0": self.PRIMARY, ":1": root})
         self.assertEqual(M._pick_display(), ":1")
 
@@ -281,7 +281,7 @@ class UnansweredServers(PluginTest):
             dumps[":0"] = self.DOCKED_ROOT
             with patch.object(M.vibrance_host, "file_identity", return_value=None), \
                     patch.object(M.vibrance_host, "read_edid", return_value=None):
-                probe = M.Plugin._monitor_probe()
+                probe = M.vibrance_panel.monitor_probe()
         self.assertNotEqual(best, ":1", "a failed read is no verdict; retry the scan")
         self.assertIs(probe[1][0], True, "docking must be visible on the server we use")
 
@@ -358,11 +358,11 @@ class XpropReads(PluginTest):
         self.assertEqual(kwargs["env"]["DISPLAY"], ":3")
 
     def test_docking_and_float_atoms_are_parsed_from_real_output(self):
-        self.outputs[M.ATOM_IS_EXTERNAL] = "GAMESCOPE_DISPLAY_IS_EXTERNAL(CARDINAL) = 1\n"
+        self.outputs[M.vibrance_x11.ATOM_IS_EXTERNAL] = "GAMESCOPE_DISPLAY_IS_EXTERNAL(CARDINAL) = 1\n"
         self.outputs[M.ATOM_SDR_WIDENESS] = "GAMESCOPE_COLOR_SDR_GAMUT_WIDENESS(CARDINAL) = 1065353216\n"
         self.assertIs(M.vibrance_x11.display_is_external(), True)
         self.assertEqual(M.vibrance_x11.read_float_atom(M.ATOM_SDR_WIDENESS), 1.0)
-        self.outputs[M.ATOM_IS_EXTERNAL] = "GAMESCOPE_DISPLAY_IS_EXTERNAL(CARDINAL) = 0\n"
+        self.outputs[M.vibrance_x11.ATOM_IS_EXTERNAL] = "GAMESCOPE_DISPLAY_IS_EXTERNAL(CARDINAL) = 0\n"
         self.assertIs(M.vibrance_x11.display_is_external(), False)
         self.outputs.clear()  # xprop prints "not found" lines without "= "
         self.assertIsNone(M.vibrance_x11.display_is_external())

@@ -30,7 +30,7 @@ M.vibrance_x11.SOCKET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file_
 READ_STRING_ATOM = M.vibrance_x11.read_string_atom
 SAVE_SETTINGS = M.Plugin._save
 PATH_EXISTS = M.os.path.exists
-WRITE_LOOK = M._write_look
+WRITE_LOOK = M.vibrance_effects.write_look
 
 
 def drain(coro):
@@ -43,11 +43,11 @@ def drain(coro):
         # Each asyncio.run creates a new loop, unlike Decky's single runtime.
         # Background saves now contend for the lock too; isolate it and await
         # cancellation before restoring the shared fixture.
-        with patch.object(M.Plugin, "_mutation_lock", asyncio.Lock()):
+        with patch.object(M.state, "mutation_lock", asyncio.Lock()):
             try:
                 return await coro
             finally:
-                tasks = [task for task in M.Plugin._tasks
+                tasks = [task for task in M.state.tasks
                          if task.get_loop() is asyncio.get_running_loop()]
                 for task in tasks:
                     task.cancel()
@@ -89,12 +89,13 @@ def _restore(snapshot):
 
 
 class StateGuard:
-    """Undo whatever a test leaves on Plugin or in main's globals.
+    """Start each test from a fresh plugin state and undo what it patches.
 
-    Plugin keeps its state on the class and main in module globals, so a test
-    that forgets to put one back changes the next test's starting point and
-    makes results depend on order. Wrapping run() covers setUp, the test and
-    every cleanup, whatever a subclass does or forgets to do.
+    The plugin's memory is one object, so each test begins and ends with
+    state.reset(). Module globals - main's tunables, the other modules' own
+    state and functions a test replaces directly - are snapshotted and put
+    back, so results never depend on the order tests run in. Wrapping run()
+    covers setUp, the test and every cleanup.
 
     It restores the attributes themselves and the contents of dicts and lists
     held directly in them, not deeper objects they point to: the stand-in
@@ -104,12 +105,15 @@ class StateGuard:
     def run(self, result=None):
         saved = [_snapshot(M.Plugin), _snapshot(M), _snapshot(M.vibrance_lutfile),
                  _snapshot(M.vibrance_x11), _snapshot(M.vibrance_host),
-                 _snapshot(M.vibrance_settings), _snapshot(M.updater)]
+                 _snapshot(M.vibrance_settings), _snapshot(M.vibrance_effects),
+                 _snapshot(M.vibrance_panel), _snapshot(M.vibrance_state), _snapshot(M.updater)]
+        M.state.reset()
         try:
             return super().run(result)
         finally:
             for snapshot in saved:
                 _restore(snapshot)
+            M.state.reset()
 
 
 class PluginTest(StateGuard, unittest.TestCase):
@@ -122,32 +126,19 @@ class PluginCase(StateGuard, unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.patches = []
         self.plugin = M.Plugin()
-        state = dict(M.Plugin._state)
-        state.update(M.DEFAULT_SETTINGS)
-        state.update(ready=True, external_display=False, hdr_supported=True,
-                     sdr_applied=False, sdr_look_applied=False, hdr_applied=False,
-                     sdr_error="", sdr_look_error="", hdr_error="", reason="ready",
-                     sdr_generating=False, generating=False,
-                     hdr_applied_saturation=None, sdr_look_saturation=None)
-        for key, value in dict(
-            _state=state, _mutation_lock=asyncio.Lock(), _tasks=[],
-            _unloading=False, _disconnected=False, _session_identity=None, _workers={}, _jobs={}, _due={},
-            _settings_dirty=False, _settings_loaded=True, _foreign_sdr_seen=None, _foreign_active_ticks=0, _look_failures={"sdr": 0, "hdr": 0}, _sdr_baseline=0.4, _last_sdr_written=None, _last_sdr_attempted=None,
-            _resume_event=None, _reassert_generation=0,
-            _sdr_look_path=None, _hdr_look_path=None,
-            _sdr_look_baseline=None, _hdr_look_baseline=None,
-            _sdr_generation=0, _sdr_look_generation=0, _hdr_generation=0,
-            _slow_checks=0, _reassert_strikes=0, _look_slot=0, _sdr_look_slot=0,
-        ).items():
-            self.mock(M.Plugin, key, value)
+        # A fresh state (StateGuard reset it) that has loaded its settings and
+        # connected to gamescope on the built-in panel.
+        M.state.public.update(ready=True, reason="ready")
+        M.state.settings_loaded = True
+        M.state.sdr_baseline = 0.4
+        # Speed, not blind spots: no disk writes and no debounce here. The real
+        # save and the debounce have tests of their own (SaveWrites, Debounce).
         self.mock(M.Plugin, "_save")
         self.mock(M.vibrance_lutfile, "disabled", False)
         self.mock(M.vibrance_x11, "timeout", 3.0)
         self.mock(M, "DEBOUNCE_S", 0)
         self.mock(M, "SDR_COALESCE_S", 0)
         self.mock(M, "SETTINGS_RETRY_S", 0.01)
-        self.mock(M, "SDR_NEUTRAL_ATOM", 1.0)
-        self.mock(M, "SDR_ATOM_SPAN", 2.0)
         self.mock(M.vibrance_x11, "foreign_sdr_values", return_value=())
         self.live_sdr = 0.8
         self.strings = {}
@@ -158,8 +149,8 @@ class PluginCase(StateGuard, unittest.IsolatedAsyncioTestCase):
         self.mock(M.os.path, "isfile", return_value=True)
         self.mock(M.os.path, "exists", return_value=True)
         # The fake builder's files live here, so the plugin knows them as its own.
-        self.mock(M, "_runtime_dir", return_value="/tmp")
-        self.builder = self.mock(M, "_write_look", side_effect=lambda value, slot, *args:
+        self.mock(M.vibrance_effects, "runtime_dir", return_value="/tmp")
+        self.builder = self.mock(M.vibrance_effects, "write_look", side_effect=lambda value, slot, *args:
                                  f"/tmp/{'sdr' if args and args[0] == 'g22' else 'hdr'}-look-{slot}.cube")
 
     def mock(self, obj, key, *args, **kwargs):
@@ -168,7 +159,7 @@ class PluginCase(StateGuard, unittest.IsolatedAsyncioTestCase):
         return item.start()
 
     async def asyncTearDown(self):
-        tasks = list(M.Plugin._tasks)
+        tasks = list(M.state.tasks)
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
@@ -184,4 +175,4 @@ class PluginCase(StateGuard, unittest.IsolatedAsyncioTestCase):
         return True
 
     async def drain(self):
-        await asyncio.gather(*list(M.Plugin._tasks))
+        await asyncio.gather(*list(M.state.tasks))

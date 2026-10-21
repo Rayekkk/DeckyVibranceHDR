@@ -77,7 +77,7 @@ class Saturation(PluginTest):
 
     def test_black_stays_black(self):
         """gamescope's bRaisesBlackLevelFloor keys off the first LUT entry."""
-        for saturation in (0.0, 0.5, 1.0, M.HDR_SOFT_LIMIT, M.HDR_MAX):
+        for saturation in (0.0, 0.5, 1.0, M.vibrance_state.HDR_SOFT_LIMIT, M.HDR_MAX):
             self.assertEqual(V.saturate((0.0, 0.0, 0.0), saturation),
                              (0.0, 0.0, 0.0))
 
@@ -243,18 +243,18 @@ class Lut(PluginTest):
     def test_an_unwritable_folder_fails_before_the_build(self):
         with tempfile.TemporaryDirectory() as folder:
             missing = os.path.join(folder, "gone", "runtime")
-            with patch.object(M, "_runtime_dir", return_value=missing), \
+            with patch.object(M.vibrance_effects, "runtime_dir", return_value=missing), \
                     patch.object(M.vibrance_lutfile, "generate") as build, \
                     patch.object(M.vibrance_lutfile, "disabled", False):
-                self.assertEqual(M._write_look(1.3, 0), "")
+                self.assertEqual(M.vibrance_effects.write_look(1.3, 0), "")
             build.assert_not_called()
 
     def test_an_unexpected_build_error_leaves_no_temporary_file(self):
         with tempfile.TemporaryDirectory() as folder:
-            with patch.object(M, "_runtime_dir", return_value=folder), \
+            with patch.object(M.vibrance_effects, "runtime_dir", return_value=folder), \
                     patch.object(M.vibrance_lutfile, "generate", side_effect=TypeError("bad request")), \
                     patch.object(M.vibrance_lutfile, "disabled", False):
-                self.assertEqual(M._write_look(1.3, 0), "")
+                self.assertEqual(M.vibrance_effects.write_look(1.3, 0), "")
             self.assertEqual(os.listdir(folder), [])
 
     def test_grid_cache_is_bounded_and_separates_source_whites(self):
@@ -276,7 +276,7 @@ class Lut(PluginTest):
     def test_cancellation_interrupts_build_and_cannot_replace_a_slot(self):
         with self.assertRaises(V.BuildCancelled):
             V.generate(1.3, cancelled=lambda: True)
-        with tempfile.TemporaryDirectory() as folder, patch.object(M, "_runtime_dir", return_value=folder), \
+        with tempfile.TemporaryDirectory() as folder, patch.object(M.vibrance_effects, "runtime_dir", return_value=folder), \
                 patch.object(M.vibrance_lutfile, "disabled", False):
             path = os.path.join(folder, "hdr-look-1.cube")
             with open(path, "w") as f:
@@ -286,7 +286,7 @@ class Lut(PluginTest):
                 nonlocal called
                 called += 1
                 return called > 3
-            self.assertEqual(M._write_look(1.3, 1, cancelled=cancelled), "")
+            self.assertEqual(M.vibrance_effects.write_look(1.3, 1, cancelled=cancelled), "")
             with open(path) as f:
                 self.assertEqual(f.read(), "old")
             self.assertEqual(os.listdir(folder), ["hdr-look-1.cube"])
@@ -296,7 +296,7 @@ class Lut(PluginTest):
         result = []
         with patch.object(M.vibrance_lutfile, "disabled", False), patch.object(V, "generate") as generate:
             with M.vibrance_lutfile.lock:
-                worker = threading.Thread(target=lambda: result.append(M._write_look(1.3, 1, cancelled=cancelled.is_set)))
+                worker = threading.Thread(target=lambda: result.append(M.vibrance_effects.write_look(1.3, 1, cancelled=cancelled.is_set)))
                 worker.start()
                 cancelled.set()
             worker.join(2)
@@ -406,7 +406,7 @@ class CompletedSlots(PluginTest):
     def setUp(self):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
-        for target, name, value in ((M, "_runtime_dir", lambda: folder.name),
+        for target, name, value in ((M.vibrance_effects, "runtime_dir", lambda: folder.name),
                                     (M.vibrance_lutfile, "SIZE", 5),
                                     (M.vibrance_lutfile, "disabled", False),
                                     (M.vibrance_lutfile, "_cache", OrderedDict())):
@@ -420,48 +420,48 @@ class CompletedSlots(PluginTest):
                 with self.subTest(encoding=encoding):
                     generate.reset_mock()
                     prefix = "hdr-look" if encoding == "pq" else "sdr-look"
-                    first = M._write_look(1.1, 0, encoding, prefix)
+                    first = M.vibrance_effects.write_look(1.1, 0, encoding, prefix)
                     original = Path(first).read_bytes()
-                    M._write_look(1.3, 1, encoding, prefix)
-                    returned = M._write_look(1.1, 0, encoding, prefix)
+                    M.vibrance_effects.write_look(1.3, 1, encoding, prefix)
+                    returned = M.vibrance_effects.write_look(1.1, 0, encoding, prefix)
                     self.assertEqual(Path(returned).read_bytes(), original)
                     self.assertEqual(generate.call_count, 2, "existing requested LUT was rebuilt")
 
     def test_encoding_white_point_and_size_invalidate_a_completed_slot(self):
         with patch.object(V, "generate", wraps=V.generate) as generate:
-            M._write_look(1.2, 0, "g22")
-            M._write_look(1.2, 0, "g22", source_white=(0.30, 0.32))
-            M._write_look(1.2, 0, "pq", source_white=(0.30, 0.32))
+            M.vibrance_effects.write_look(1.2, 0, "g22")
+            M.vibrance_effects.write_look(1.2, 0, "g22", source_white=(0.30, 0.32))
+            M.vibrance_effects.write_look(1.2, 0, "pq", source_white=(0.30, 0.32))
             with patch.object(M.vibrance_lutfile, "SIZE", 6):
-                path = M._write_look(1.2, 0, "pq", source_white=(0.30, 0.32))
+                path = M.vibrance_effects.write_look(1.2, 0, "pq", source_white=(0.30, 0.32))
             self.assertIn("LUT_3D_SIZE 6", Path(path).read_text())
             self.assertEqual(generate.call_count, 4)
 
     def test_replaced_or_deleted_files_are_regenerated(self):
         with patch.object(V, "generate", wraps=V.generate) as generate:
-            path = Path(M._write_look(1.2, 0))
+            path = Path(M.vibrance_effects.write_look(1.2, 0))
             original = path.read_bytes()
             replacement = path.with_suffix(".replacement")
             replacement.write_text("damaged")
             replacement.replace(path)
-            self.assertEqual(M._write_look(1.2, 0), str(path))
+            self.assertEqual(M.vibrance_effects.write_look(1.2, 0), str(path))
             self.assertEqual(path.read_bytes(), original)
             path.unlink()
-            self.assertEqual(M._write_look(1.2, 0), str(path))
+            self.assertEqual(M.vibrance_effects.write_look(1.2, 0), str(path))
             self.assertEqual(path.read_bytes(), original)
             self.assertEqual(generate.call_count, 3)
 
     def test_cached_hit_honors_cancellation_and_unload_without_writing(self):
-        path = Path(M._write_look(1.2, 0))
+        path = Path(M.vibrance_effects.write_look(1.2, 0))
         original = M.vibrance_host.file_identity(path)
         with patch.object(V, "generate", wraps=V.generate) as generate, \
                 patch.object(M.os, "replace") as replace:
-            self.assertEqual(M._write_look(1.2, 0, cancelled=lambda: True), "")
+            self.assertEqual(M.vibrance_effects.write_look(1.2, 0, cancelled=lambda: True), "")
             with patch.object(M.vibrance_lutfile, "disabled", True):
-                self.assertEqual(M._write_look(1.2, 0), "")
+                self.assertEqual(M.vibrance_effects.write_look(1.2, 0), "")
             checks = iter((False, True))
-            self.assertEqual(M._write_look(1.2, 0, cancelled=lambda: next(checks)), "")
-            self.assertEqual(M._write_look(1.2, 0), str(path))
+            self.assertEqual(M.vibrance_effects.write_look(1.2, 0, cancelled=lambda: next(checks)), "")
+            self.assertEqual(M.vibrance_effects.write_look(1.2, 0), str(path))
             self.assertEqual(M.vibrance_host.file_identity(path), original)
             generate.assert_not_called()
             replace.assert_not_called()
@@ -469,20 +469,20 @@ class CompletedSlots(PluginTest):
     def test_metadata_cache_is_bounded_and_eviction_rebuilds(self):
         with patch.object(V, "generate", wraps=V.generate) as generate:
             for i in range(6):
-                M._write_look(1.2, 0, prefix=f"slot-{i}")
+                M.vibrance_effects.write_look(1.2, 0, prefix=f"slot-{i}")
             self.assertEqual(len(M.vibrance_lutfile._cache), 4)
-            M._write_look(1.2, 0, prefix="slot-5")
+            M.vibrance_effects.write_look(1.2, 0, prefix="slot-5")
             self.assertEqual(generate.call_count, 6)
-            M._write_look(1.2, 0, prefix="slot-0")
+            M.vibrance_effects.write_look(1.2, 0, prefix="slot-0")
             self.assertEqual(generate.call_count, 7)
             self.assertEqual(len(M.vibrance_lutfile._cache), 4)
 
     def test_cache_does_not_bypass_saturation_or_size_type_validation(self):
-        path = Path(M._write_look(1.0, 0))
+        path = Path(M.vibrance_effects.write_look(1.0, 0))
         original = path.read_bytes()
-        self.assertEqual(M._write_look(True, 0), "")
+        self.assertEqual(M.vibrance_effects.write_look(True, 0), "")
         with patch.object(M.vibrance_lutfile, "SIZE", 5.0):
-            self.assertEqual(M._write_look(1.0, 0), "")
+            self.assertEqual(M.vibrance_effects.write_look(1.0, 0), "")
         self.assertEqual(path.read_bytes(), original)
 
 

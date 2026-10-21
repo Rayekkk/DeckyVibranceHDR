@@ -22,7 +22,7 @@ import main as M
 
 class AtomicSettings(PluginTest):
     def setUp(self):
-        loaded = patch.object(M.Plugin, "_settings_loaded", True)
+        loaded = patch.object(M.state, "settings_loaded", True)
         loaded.start()
         self.addCleanup(loaded.stop)
 
@@ -49,7 +49,7 @@ class AtomicSettings(PluginTest):
             with open(path, "w") as f:
                 json.dump(old, f)
             manager = SimpleNamespace(path=path, settings=old.copy())
-            with patch.object(M, "settings", manager), patch.object(M.Plugin, "_state", {**old, "hdr_saturation": 1.4}):
+            with patch.object(M, "settings", manager), patch.object(M.state, "public", {**old, "hdr_saturation": 1.4}):
                 with patch.object(M.os, "replace", side_effect=OSError("full")):
                     with self.assertRaises(OSError):
                         M.Plugin._save()
@@ -174,12 +174,12 @@ class ReadFailure(PluginCase):
             try:
                 await failed.wait()
                 await asyncio.sleep(.03)
-                self.assertFalse(M.Plugin._settings_loaded)
-                self.assertIn("settings", M.Plugin._state["reason"])
+                self.assertFalse(M.state.settings_loaded)
+                self.assertIn("settings", M.state.public["reason"])
                 await self.plugin._unload()
                 self.assertEqual(json.loads(path.read_text()), saved)
             finally:
-                M.Plugin._unloading = True
+                M.state.unloading = True
                 await asyncio.wait_for(startup, 2)
 
     async def test_transient_settings_read_failure_recovers_saved_values(self):
@@ -199,13 +199,13 @@ class ReadFailure(PluginCase):
         store.read = read
         self.mock(M, "settings", store)
         await self.plugin._main()
-        await asyncio.gather(*M.Plugin._tasks)
+        await asyncio.gather(*M.state.tasks)
         self.assertEqual(calls, 2)
-        self.assertTrue(M.Plugin._settings_loaded)
-        self.assertTrue(M.Plugin._state["settings_loaded"])
+        self.assertTrue(M.state.settings_loaded)
+        self.assertTrue(M.state.public["settings_loaded"])
         for key, value in saved.items():
-            self.assertEqual(M.Plugin._state[key], value)
-        self.assertEqual(M.Plugin._state["settings_error"], "")
+            self.assertEqual(M.state.public[key], value)
+        self.assertEqual(M.state.public["settings_error"], "")
         recovery.assert_awaited_once()
 
     async def test_manager_that_swallows_errors_cannot_overwrite_corrupt_file(self):
@@ -244,13 +244,13 @@ class ReadFailure(PluginCase):
                     self.mock(M, "settings", store)
                     # Bounded: a regression that never reads defaults would loop forever.
                     await asyncio.wait_for(self.plugin._main(), 5)
-                    self.assertTrue(M.Plugin._state["settings_loaded"])
-                    self.assertFalse(M.Plugin._state["sdr_enabled"])
-                    self.assertEqual(M.Plugin._state["settings_error"], "")
+                    self.assertTrue(M.state.public["settings_loaded"])
+                    self.assertFalse(M.state.public["sdr_enabled"])
+                    self.assertEqual(M.state.public["settings_error"], "")
                     self.assertFalse(path.exists())
                     (aside,) = Path(folder).glob("settings.json.corrupt-*")
                     self.assertEqual(aside.read_bytes(), broken)
-                    self.assertIn(aside.name, M.Plugin._state["settings_notice"])  # the menu says so
+                    self.assertIn(aside.name, M.state.public["settings_notice"])  # the menu says so
         self.assertEqual(recovery.call_count, 3)
 
     async def test_a_file_that_cannot_be_set_aside_is_kept_and_retried(self):
@@ -271,14 +271,14 @@ class ReadFailure(PluginCase):
             try:
                 await asyncio.wait_for(refused.wait(), 5)
                 for _ in range(500):  # the error is published after the thread returns
-                    if "could not set the file aside" in M.Plugin._state["settings_error"]:
+                    if "could not set the file aside" in M.state.public["settings_error"]:
                         break
                     await asyncio.sleep(0.01)
-                self.assertFalse(M.Plugin._state["settings_loaded"])
-                self.assertIn("could not set the file aside", M.Plugin._state["settings_error"])
+                self.assertFalse(M.state.public["settings_loaded"])
+                self.assertIn("could not set the file aside", M.state.public["settings_error"])
                 self.assertEqual(path.read_text(), "{broken")
             finally:
-                M.Plugin._unloading = True
+                M.state.unloading = True
                 startup.cancel()
                 with self.assertRaises(asyncio.CancelledError):
                     await startup
@@ -309,9 +309,9 @@ class ReadFailure(PluginCase):
         self.mock(M.Plugin, "_save", side_effect=OSError("read-only file system"))
         error = self.mock(M.decky.logger, "error")
         for _ in range(3):
-            M.Plugin._state["settings_error"] = M.Plugin._write_settings()
+            M.state.public["settings_error"] = M.Plugin._write_settings()
         self.assertEqual(error.call_count, 1)
-        self.assertIn("read-only", M.Plugin._state["settings_error"])
+        self.assertIn("read-only", M.state.public["settings_error"])
 
     async def test_empty_file_loads_as_defaults_but_missing_file_is_retried(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -357,10 +357,10 @@ class ReadFailure(PluginCase):
             startup = asyncio.create_task(self.plugin._main())
             try:
                 for _ in range(100):
-                    if not M.Plugin._settings_loaded and M.Plugin._state.get("settings_error"):
+                    if not M.state.settings_loaded and M.state.public.get("settings_error"):
                         break
                     await asyncio.sleep(.01)
-                before = dict(M.Plugin._state)
+                before = dict(M.state.public)
                 for method, args in [("set_sdr_enabled", (True, 2.2)),
                                      ("set_hdr_enabled", (True, 1.3)),
                                      ("set_sdr_saturation", (2.3,)),
@@ -368,34 +368,34 @@ class ReadFailure(PluginCase):
                     with self.subTest(method=method):
                         with self.assertRaisesRegex(RuntimeError, "settings"):
                             await getattr(self.plugin, method)(*args)
-                self.assertEqual(M.Plugin._state, before)
-                self.assertFalse(M.Plugin._settings_dirty)
-                self.assertEqual(M.Plugin._tasks, [])
+                self.assertEqual(M.state.public, before)
+                self.assertFalse(M.state.settings_dirty)
+                self.assertEqual(M.state.tasks, [])
                 await self.plugin._unload()
                 self.assertEqual(json.loads(path.read_text()), saved)
             finally:
-                M.Plugin._unloading = True
+                M.state.unloading = True
                 await asyncio.wait_for(startup, 2)
 
     async def test_save_boundaries_reject_unread_settings_even_if_dirty(self):
-        self.mock(M.Plugin, "_settings_loaded", False)
-        self.mock(M.Plugin, "_settings_dirty", True)
+        self.mock(M.state, "settings_loaded", False)
+        self.mock(M.state, "settings_dirty", True)
         store = self.mock(M, "settings", SimpleNamespace(settings={}))
         with self.assertRaisesRegex(RuntimeError, "settings"):
             SAVE_SETTINGS({"hdr_saturation": 1.3})
         self.plugin._schedule_save()
         M.Plugin._persist()
         self.assertEqual(store.settings, {})
-        self.assertEqual(M.Plugin._tasks, [])
+        self.assertEqual(M.state.tasks, [])
         await self.plugin._unload()
         M.Plugin._save.assert_not_called()
 
     async def test_loaded_settings_accept_changes_while_gamescope_disconnected(self):
-        self.mock(M.Plugin, "_settings_loaded", True)
-        self.mock(M.Plugin, "_disconnected", True)
+        self.mock(M.state, "settings_loaded", True)
+        self.mock(M.state, "disconnected", True)
         await self.plugin.set_hdr_saturation(1.3)
-        self.assertEqual(M.Plugin._state["hdr_saturation"], 1.3)
-        self.assertTrue(M.Plugin._settings_dirty)
+        self.assertEqual(M.state.public["hdr_saturation"], 1.3)
+        self.assertTrue(M.state.settings_dirty)
 
 
 class SettingsWrites(PluginCase):
@@ -406,10 +406,10 @@ class SettingsWrites(PluginCase):
         self.mock(M.Plugin, "_save", side_effect=OSError("disk full"))
         await self.plugin.set_sdr_enabled(False)
         await self.drain()
-        self.assertFalse(M.Plugin._state["sdr_applied"])
+        self.assertFalse(M.state.public["sdr_applied"])
         self.assertEqual(self.live_sdr, 0.8)
-        self.assertIn("disk full", M.Plugin._state["settings_error"])
-        self.assertTrue(M.Plugin._settings_dirty)
+        self.assertIn("disk full", M.state.public["settings_error"])
+        self.assertTrue(M.state.settings_dirty)
 
     async def test_disabled_hdr_slider_is_persisted(self):
         await self.plugin.set_hdr_saturation(1.3)
@@ -420,22 +420,22 @@ class SettingsWrites(PluginCase):
     async def test_unload_flushes_a_pending_slider_value(self):
         self.mock(M, "SDR_COALESCE_S", 5)
         saved = []
-        self.mock(M.Plugin, "_save", side_effect=lambda values=None: saved.append(dict(M.Plugin._state)))
+        self.mock(M.Plugin, "_save", side_effect=lambda values=None: saved.append(dict(M.state.public)))
         await self.plugin.set_hdr_saturation(1.4)
         await self.plugin._unload()
         self.assertEqual(saved[-1]["hdr_saturation"], 1.4)
         self.assertEqual(len(saved), 1)
 
     async def test_late_rpc_after_unload_cannot_change_flushed_settings(self):
-        M.Plugin._unloading = True
-        before = dict(M.Plugin._state)
+        M.state.unloading = True
+        before = dict(M.state.public)
         await self.plugin.set_sdr_saturation(1.4)
         await self.plugin.set_hdr_saturation(1.4)
         await self.plugin.set_sdr_enabled(True, 1.4)
         await self.plugin.set_hdr_enabled(False, 1.4)
         await self.plugin.reset()
-        self.assertEqual(M.Plugin._state, before)
-        self.assertEqual(M.Plugin._tasks, [])
+        self.assertEqual(M.state.public, before)
+        self.assertEqual(M.state.tasks, [])
 
     async def test_both_sliders_share_one_settings_write(self):
         await self.plugin.set_sdr_saturation(1.4)
@@ -477,7 +477,7 @@ class SettingsWrites(PluginCase):
         try:
             self.assertTrue(await asyncio.to_thread(entered.wait, 1))
             self.assertTrue(disable.done(), "disable RPC waits for filesystem persistence")
-            self.assertFalse(M.Plugin._state["sdr_applied"])
+            self.assertFalse(M.state.public["sdr_applied"])
             self.assertEqual(self.live_sdr, 0.8)
         finally:
             release.set()
@@ -500,18 +500,18 @@ class SettingsWrites(PluginCase):
         await self.plugin.set_hdr_saturation(1.2)
         try:
             self.assertTrue(await asyncio.to_thread(first.wait, 1))
-            worker = M.Plugin._workers["settings"]
+            worker = M.state.workers["settings"]
             await self.plugin.set_hdr_saturation(1.4)
             await self.plugin.set_sdr_saturation(1.5)
-            generation = M.Plugin._save_generation
+            generation = M.state.save_generation
             for _ in range(30):
                 await self.plugin.set_hdr_saturation(1.4)
                 self.plugin._retry_settings_save()
-            self.assertEqual(M.Plugin._save_generation, generation)
-            self.assertIs(M.Plugin._workers["settings"], worker)
+            self.assertEqual(M.state.save_generation, generation)
+            self.assertIs(M.state.workers["settings"], worker)
             release_first.set()
             self.assertTrue(await asyncio.to_thread(second.wait, 1))
-            self.assertTrue(M.Plugin._settings_dirty, "older completion acknowledged unsaved edits")
+            self.assertTrue(M.state.settings_dirty, "older completion acknowledged unsaved edits")
             self.assertEqual(snapshots[0]["hdr_saturation"], 1.2)
             self.assertEqual(snapshots[1]["hdr_saturation"], 1.4)
             self.assertEqual(snapshots[1]["sdr_saturation"], 1.5)
@@ -520,7 +520,7 @@ class SettingsWrites(PluginCase):
             release_second.set()
             await self.drain()
         self.assertEqual(len(snapshots), 2)
-        self.assertFalse(M.Plugin._settings_dirty)
+        self.assertFalse(M.state.settings_dirty)
 
     async def test_latest_disk_failure_remains_visible_then_same_value_retries(self):
         first, release = threading.Event(), threading.Event()
@@ -540,13 +540,13 @@ class SettingsWrites(PluginCase):
         finally:
             release.set()
             await self.drain()
-        self.assertTrue(M.Plugin._settings_dirty)
-        self.assertIn("latest snapshot failed", M.Plugin._state["settings_error"])
+        self.assertTrue(M.state.settings_dirty)
+        self.assertIn("latest snapshot failed", M.state.public["settings_error"])
         await self.plugin.set_hdr_saturation(1.4)
         await self.drain()
         self.assertEqual([value["hdr_saturation"] for value in snapshots], [1.2, 1.4, 1.4])
-        self.assertFalse(M.Plugin._settings_dirty)
-        self.assertEqual(M.Plugin._state["settings_error"], "")
+        self.assertFalse(M.state.settings_dirty)
+        self.assertEqual(M.state.public["settings_error"], "")
 
     async def test_unload_serializes_behind_an_older_write_and_flushes_latest_values(self):
         entered, release = threading.Event(), threading.Event()
@@ -569,7 +569,7 @@ class SettingsWrites(PluginCase):
                 await self.plugin.set_hdr_saturation(1.4)
                 unload = asyncio.create_task(self.plugin._unload())
                 await asyncio.sleep(0)
-                self.assertTrue(M.Plugin._unloading)
+                self.assertTrue(M.state.unloading)
                 late = await self.plugin.set_hdr_saturation(1.5)
                 self.assertEqual(late["hdr_saturation"], 1.4)
             finally:
@@ -581,7 +581,7 @@ class SettingsWrites(PluginCase):
             saved = json.loads(path.read_text(encoding="utf-8"))
             self.assertEqual(saved["hdr_saturation"], 1.4)
             self.assertEqual(saved["unrelated"], "keep")
-            self.assertFalse(M.Plugin._settings_dirty)
+            self.assertFalse(M.state.settings_dirty)
 
 
 class StartupRecovery(PluginCase):
@@ -600,8 +600,8 @@ class StartupRecovery(PluginCase):
         store.read = read
         self.mock(M, "settings", store)
         await self.plugin._main()
-        self.assertEqual(M.Plugin._state["settings_error"], "")  # before any save runs
-        await asyncio.gather(*M.Plugin._tasks)
+        self.assertEqual(M.state.public["settings_error"], "")  # before any save runs
+        await asyncio.gather(*M.state.tasks)
         saved = M.Plugin._save.call_args.args[0]
         self.assertEqual(saved["sdr_saturation"], M.SDR_MAX_WIDE)
 
@@ -689,13 +689,13 @@ class SaveFailureLogging(PluginTest):
         with tempfile.TemporaryDirectory() as folder:
             manager = SimpleNamespace(path=os.path.join(folder, "gone", "settings.json"), settings={})
             with patch.object(M, "settings", manager), \
-                    patch.object(M.Plugin, "_settings_loaded", True), \
+                    patch.object(M.state, "settings_loaded", True), \
                     patch.object(M.Plugin, "_save", SAVE_SETTINGS), \
                     patch.object(M.decky.logger, "error") as error:
                 messages = []
                 for _ in range(3):                    # three panel-tick retries
                     message = M.Plugin._write_settings()
-                    M.Plugin._state["settings_error"] = message
+                    M.state.public["settings_error"] = message
                     messages.append(message)
             self.assertEqual(error.call_count, 1, [c.args[0] for c in error.call_args_list])
             self.assertEqual(len(set(messages)), 1, messages)
