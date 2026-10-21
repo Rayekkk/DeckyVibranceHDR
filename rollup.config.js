@@ -16,6 +16,8 @@ export default {
       "react-dom": "SP_REACTDOM", "@decky/ui": "DFL",
       "@decky/manifest": JSON.stringify(manifest) })],
   output: { dir: "dist", format: "esm", exports: "default", sourcemap: true,
-    sourcemapPathTransform: path => path.replace(/^\.\.\//,
+    // Rollup hands this hook native separators; on Windows the prefix only
+    // matches once they are forward slashes.
+    sourcemapPathTransform: path => path.replace(/\\/g, "/").replace(/^\.\.\//,
       `decky://decky/plugin/${encodeURIComponent(manifest.name)}/`) },
 };
