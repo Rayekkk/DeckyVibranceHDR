@@ -6,10 +6,17 @@ from pathlib import Path
 import subprocess
 import zipfile
 
+
+
+def backend(root):
+    """main.py, the updater and every vibrance_*.py beside them: no list to forget."""
+    return ("main.py", "lego_updater.py", *sorted(p.name for p in Path(root).glob("vibrance_*.py")))
+
+
 # Everything that ends up in, or decides, the ZIP. Docs and tests do not.
-SHIPPED = ("main.py", "lego_updater.py", "vibrance_lut.py", "vibrance_edid.py", "plugin.json",
-           "package.json", "package-lock.json", "README.md", "CHANGELOG.md", "LICENSE", "NOTICE",
-           "src", "rollup.config.js", "tsconfig.json", "scripts/package.mjs")
+SHIPPED = ("main.py", "lego_updater.py", "vibrance_*.py", "plugin.json", "package.json", "package-lock.json", "README.md", "CHANGELOG.md",
+                     "LICENSE", "NOTICE", "src", "rollup.config.js", "tsconfig.json",
+                     "scripts/package.mjs")
 
 
 def require(condition, message):
@@ -39,8 +46,11 @@ def verify(root):
         dist_files = {name.removeprefix(prefix + "dist/") for name in names
                       if name.startswith(prefix + "dist/") and not name.endswith("/")}
         require(dist_files == {"index.js", "index.js.map"}, "stale/unexpected frontend build files")
-        files = ("main.py", "lego_updater.py", "vibrance_lut.py", "vibrance_edid.py", "plugin.json", "package.json",
-                 "README.md", "CHANGELOG.md", "LICENSE", "NOTICE", "dist/index.js", "dist/index.js.map")
+        modules = {name.removeprefix(prefix) for name in names
+                   if name.startswith(prefix) and name.endswith(".py") and "/" not in name.removeprefix(prefix)}
+        require(modules == set(backend(root)), "backend modules differ from the checkout")
+        files = backend(root) + ("plugin.json", "package.json", "README.md", "CHANGELOG.md", "LICENSE",
+                           "NOTICE", "dist/index.js", "dist/index.js.map")
         for name in files:
             require(archive.read(prefix + name) == (root / name).read_bytes(), f"stale/missing payload: {name}")
         package = json.loads(archive.read(prefix + "package.json"))

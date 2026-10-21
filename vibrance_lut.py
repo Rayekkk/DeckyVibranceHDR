@@ -291,7 +291,7 @@ def _prepared_grid(size, encoding, source_white, cancelled):
 def validate(saturation, size, encoding, source_white) -> None:
     """Raise ValueError for any request generate() would refuse.
 
-    main.py checks with this before handing a build to the native worker, so
+    vibrance_lutfile checks with this before handing a build to the native worker, so
     a bad request fails in-process rather than as a subprocess error.
     """
     if not isinstance(size, int) or isinstance(size, bool) or not 2 <= size <= 128:

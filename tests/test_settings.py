@@ -40,7 +40,7 @@ class AtomicSettings(PluginTest):
                     self.assertIn("hdr_saturation", json.load(f))
     def test_nonfinite_xproperty_cannot_become_a_saved_baseline(self):
         for value in (float("nan"), float("inf"), float("-inf")):
-            self.assertIsNone(M._cardinal_to_float(M._float_to_cardinal(value)))
+            self.assertIsNone(M.vibrance_x11.cardinal_to_float(M.vibrance_x11.float_to_cardinal(value)))
 
     def test_one_snapshot_preserves_other_keys_and_keeps_old_file_on_failure(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -89,7 +89,7 @@ class SettingsFileContract(PluginTest):
                 "settings.SettingsManager = EagerManager",
                 "import main as M",
                 "assert M.settings.settings == {}",
-                "try: M._read_settings()",
+                "try: M.vibrance_settings.read(M.settings)",
                 "except ValueError as e: assert 'regular file' in str(e)",
                 "else: raise AssertionError('FIFO accepted')",
             ])
@@ -104,8 +104,8 @@ class SettingsFileContract(PluginTest):
             values = {"sdr_enabled": True, "custom": {"label": "zażółć"}}
             path.write_text(json.dumps(values), encoding="utf-8")
             store = SimpleNamespace(path=str(path), settings={})
-            with patch.object(M, "settings", store), patch.object(M, "_settings_new", False):
-                M._read_settings()
+            with patch.object(M, "settings", store), patch.object(M.vibrance_settings, "new", False):
+                M.vibrance_settings.read(M.settings)
             self.assertEqual(store.settings, values)
             self.assertEqual(json.loads(path.read_text(encoding="utf-8")), values)
 
@@ -121,10 +121,10 @@ class SettingsFileContract(PluginTest):
                 "import main as M",
                 "from types import SimpleNamespace",
                 "M.settings = SimpleNamespace(path=sys.argv[1], settings={'custom': 'keep'})",
-                "M._settings_new = False",
+                "M.vibrance_settings.new = False",
                 "before = len(os.listdir('/proc/self/fd'))",
                 "for _ in range(100):",
-                " try: M._read_settings()",
+                " try: M.vibrance_settings.read(M.settings)",
                 " except ValueError as e: assert 'regular file' in str(e)",
                 " else: raise AssertionError('FIFO accepted')",
                 "assert len(os.listdir('/proc/self/fd')) == before",
@@ -144,8 +144,8 @@ class SettingsFileContract(PluginTest):
             link = Path(directory) / "settings.json"
             link.symlink_to(real)
             store = SimpleNamespace(path=str(link), settings={})
-            with patch.object(M, "settings", store), patch.object(M, "_settings_new", False):
-                M._read_settings()
+            with patch.object(M, "settings", store), patch.object(M.vibrance_settings, "new", False):
+                M.vibrance_settings.read(M.settings)
             self.assertEqual(store.settings, {"hdr_saturation": 1.4})
 
 
@@ -209,20 +209,20 @@ class ReadFailure(PluginCase):
         recovery.assert_awaited_once()
 
     async def test_manager_that_swallows_errors_cannot_overwrite_corrupt_file(self):
-        self.mock(M, "_settings_new", False)
+        self.mock(M.vibrance_settings, "new", False)
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "settings.json"
             path.write_text("{broken settings")
             store = SimpleNamespace(path=str(path), settings={}, read=lambda: None)
             self.mock(M, "settings", store)
-            with self.assertRaises(M.SettingsUnreadable):
-                M._read_settings()
+            with self.assertRaises(M.vibrance_settings.SettingsUnreadable):
+                M.vibrance_settings.read(M.settings)
             self.assertEqual(path.read_text(), "{broken settings")
             # Nesting deep enough to overflow the parser is a RecursionError,
             # not a ValueError, and must still count as unparseable.
             path.write_text("[" * 100000)
-            with self.assertRaises(M.SettingsUnreadable):
-                M._read_settings()
+            with self.assertRaises(M.vibrance_settings.SettingsUnreadable):
+                M.vibrance_settings.read(M.settings)
             self.assertEqual(store.settings, {})
 
     async def test_unparseable_settings_are_set_aside_and_startup_continues(self):
@@ -230,7 +230,7 @@ class ReadFailure(PluginCase):
         plugin dead with no way out from the menu. The bytes are kept."""
         self.mock(M.updater, "ssl_context", return_value=None)
         recovery = self.mock(self.plugin, "_start_when_ready")
-        self.mock(M, "_settings_new", False)
+        self.mock(M.vibrance_settings, "new", False)
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "settings.json"
             for broken in (b"{broken settings", b"\xff\xfe not utf-8", b"[1, 2]"):
@@ -238,7 +238,7 @@ class ReadFailure(PluginCase):
                     for leftover in Path(folder).iterdir():
                         leftover.unlink()
                     path.write_bytes(broken)
-                    M._settings_new = False
+                    M.vibrance_settings.new = False
                     store = SimpleNamespace(path=str(path), settings={"sdr_enabled": True})
                     store.getSetting = lambda key, default: store.settings.get(key, default)
                     self.mock(M, "settings", store)
@@ -255,17 +255,17 @@ class ReadFailure(PluginCase):
     async def test_a_file_that_cannot_be_set_aside_is_kept_and_retried(self):
         self.mock(M.updater, "ssl_context", return_value=None)
         self.mock(self.plugin, "_start_when_ready")
-        self.mock(M, "_settings_new", False)
+        self.mock(M.vibrance_settings, "new", False)
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "settings.json"
             path.write_text("{broken")
             self.mock(M, "settings", SimpleNamespace(path=str(path), settings={}))
             refused = asyncio.Event()
             loop = asyncio.get_running_loop()
-            def refuse():
+            def refuse(_manager):
                 loop.call_soon_threadsafe(refused.set)
                 raise PermissionError("read-only settings folder")
-            self.mock(M, "_set_aside_settings", side_effect=refuse)
+            self.mock(M.vibrance_settings, "set_aside", side_effect=refuse)
             startup = asyncio.create_task(self.plugin._main())
             try:
                 await asyncio.wait_for(refused.wait(), 5)
@@ -285,7 +285,7 @@ class ReadFailure(PluginCase):
     async def test_a_lasting_read_failure_is_logged_once_not_every_retry(self):
         self.mock(M.updater, "ssl_context", return_value=None)
         self.mock(self.plugin, "_start_when_ready")
-        self.mock(M, "_read_settings", side_effect=[PermissionError("denied")] * 4 + [None])
+        self.mock(M.vibrance_settings, "read", side_effect=[PermissionError("denied")] * 4 + [None])
         warning = self.mock(M.decky.logger, "warning")
         await self.plugin._main()
         logged = [call for call in warning.call_args_list if "could not load settings" in call.args[0]]
@@ -295,7 +295,7 @@ class ReadFailure(PluginCase):
         self.mock(M.updater, "ssl_context", return_value=None)
         self.mock(self.plugin, "_start_when_ready")
         self.mock(M, "SETTINGS_RETRY_S", 0)
-        self.mock(M, "_read_settings", side_effect=[PermissionError("denied")] * 2
+        self.mock(M.vibrance_settings, "read", side_effect=[PermissionError("denied")] * 2
                   + [OSError("I/O error")] * 2 + [None])
         warning = self.mock(M.decky.logger, "warning")
         await self.plugin._main()
@@ -316,15 +316,15 @@ class ReadFailure(PluginCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "settings.json"
             self.mock(M, "settings", SimpleNamespace(path=str(path), settings={"stale": 1}))
-            self.mock(M, "_settings_new", False)
+            self.mock(M.vibrance_settings, "new", False)
             # A previously existing file that is now missing is not a fresh install.
             with self.assertRaises(FileNotFoundError):
-                M._read_settings()
+                M.vibrance_settings.read(M.settings)
             # An empty file - first-install manager file, or 1.0.0's truncating
             # write cut short - has nothing to protect and must not block startup.
             for empty in ("", "  \n"):
                 path.write_text(empty)
-                M._read_settings()
+                M.vibrance_settings.read(M.settings)
                 self.assertEqual(M.settings.settings, {})
                 self.assertEqual(path.read_text(), empty)
 
@@ -332,14 +332,14 @@ class ReadFailure(PluginCase):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "settings.json"
             self.mock(M, "settings", SimpleNamespace(path=str(path), settings={}))
-            self.mock(M, "_settings_new", False)
+            self.mock(M.vibrance_settings, "new", False)
             for invalid in ("null", "[]", "42"):
                 path.write_text(invalid)
                 with self.assertRaises(ValueError):
-                    M._read_settings()
+                    M.vibrance_settings.read(M.settings)
             saved = {"sdr_saturation": 2.6, "custom": "preserve"}
             path.write_text(json.dumps(saved))
-            M._read_settings()
+            M.vibrance_settings.read(M.settings)
             self.assertEqual(M.settings.settings, saved)
 
     async def test_replayed_mutations_during_failed_startup_preserve_unread_file(self):
@@ -352,7 +352,7 @@ class ReadFailure(PluginCase):
                      "sdr_saturation": 2.6, "hdr_saturation": 1.4, "custom": "keep"}
             path.write_text(json.dumps(saved))
             self.mock(M, "settings", SimpleNamespace(path=str(path), settings={}))
-            self.mock(M, "_read_settings", side_effect=PermissionError("unavailable"))
+            self.mock(M.vibrance_settings, "read", side_effect=PermissionError("unavailable"))
             startup = asyncio.create_task(self.plugin._main())
             try:
                 for _ in range(100):
@@ -555,7 +555,7 @@ class SettingsWrites(PluginCase):
             self.mock(M, "settings", SimpleNamespace(path=str(path), settings={"unrelated": "keep"}))
             self.mock(M.os.path, "exists", side_effect=PATH_EXISTS)
             def save(values=None):
-                with M._settings_lock:
+                with M.vibrance_settings.lock:
                     if values is not None:
                         entered.set()
                         release.wait(2)

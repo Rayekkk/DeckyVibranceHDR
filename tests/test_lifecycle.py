@@ -5,6 +5,7 @@
 """Startup, suspend/resume, monitoring, session recovery and unload."""
 
 import asyncio
+import itertools
 import json
 import os
 import subprocess
@@ -21,9 +22,9 @@ import main as M
 class Recovery(PluginCase):
     def stub_connect(self, identity, **configure):
         """Stand in for everything connecting touches except the SDR atom."""
-        self.mock(M, "_display_session_identity", return_value=identity)
+        self.mock(M.vibrance_x11, "session_identity", return_value=identity)
         self.mock(M, "_pick_display", return_value=":0")
-        self.mock(M, "_count_gamescope_atoms", return_value=44)
+        self.mock(M.vibrance_x11, "count_gamescope_atoms", return_value=44)
         self.mock(M, "GAMESCOPE_SETTLE_S", 0)
         self.mock(M.Plugin, "_configure_for_panel", **(configure or {"return_value": False}))
         self.mock(M.Plugin, "_capture_existing_looks")
@@ -267,7 +268,7 @@ class Recovery(PluginCase):
         await self.plugin.set_sdr_enabled(True)
         self.live_sdr = None
         self.float_writer.reset_mock()
-        count = self.mock(M, "_count_gamescope_atoms", return_value=0)
+        count = self.mock(M.vibrance_x11, "count_gamescope_atoms", return_value=0)
         M.Plugin._watch_once()
         self.float_writer.assert_not_called()
         count.return_value = 42
@@ -300,9 +301,9 @@ class Reassert(PluginTest):
             self.live[0] = value
             return True
 
-        M._read_float_atom = lambda name: self.live[0]
-        M._write_float_atom = fake_write
-        M._foreign_sdr_values = lambda: ()
+        M.vibrance_x11.read_float_atom = lambda name: self.live[0]
+        M.vibrance_x11.write_float_atom = fake_write
+        M.vibrance_x11.foreign_sdr_values = lambda: ()
         M.Plugin._reassert_looks_if_dropped = staticmethod(lambda: None)
         M.Plugin._slow_checks = 0
         M.Plugin._foreign_sdr_seen, M.Plugin._foreign_active_ticks = None, 0
@@ -420,12 +421,12 @@ class IsolatedStartup(PluginTest):
         from unittest.mock import patch
         state = dict(M.Plugin._state)
         state.update(sdr_applied=False, sdr_look_applied=False, hdr_applied=False)
-        patches = [(M, "_read_string_atom", lambda _name: None),
-                   (M, "_read_float_atom", lambda _name: 1.0),
-                   (M, "_write_string_atom", lambda *_args: True),
-                   (M, "_write_float_atom", lambda *_args: True),
-                   (M, "_display_is_external", lambda: False),
-                   (M, "_display_session_identity", lambda: None),
+        patches = [(M.vibrance_x11, "read_string_atom", lambda _name: None),
+                   (M.vibrance_x11, "read_float_atom", lambda _name: 1.0),
+                   (M.vibrance_x11, "write_string_atom", lambda *_args: True),
+                   (M.vibrance_x11, "write_float_atom", lambda *_args: True),
+                   (M.vibrance_x11, "display_is_external", lambda: False),
+                   (M.vibrance_x11, "session_identity", lambda: None),
                    (M.Plugin, "_state", state),
                    (M.Plugin, "_session_identity", None),
                    (M.Plugin, "_disconnected", False),
@@ -464,8 +465,8 @@ class StartupRetry(IsolatedStartup):
         M._pick_display = flaky
         M._panel_is_wide_gamut = lambda *_args: True
         M._panel_supports_hdr = lambda *_args: True
-        M._read_float_atom = lambda name: 1.0
-        M._count_gamescope_atoms = lambda display: 44
+        M.vibrance_x11.read_float_atom = lambda name: 1.0
+        M.vibrance_x11.count_gamescope_atoms = lambda display: 44
         with patch.object(asyncio, "sleep", no_wait):
             drain(M.Plugin()._start_when_ready())
         self.assertEqual(len(attempts), 3)
@@ -490,13 +491,13 @@ class StartupSettles(IsolatedStartup):
         async def no_wait(_seconds):
             return None
 
-        M._count_gamescope_atoms = counter
+        M.vibrance_x11.count_gamescope_atoms = counter
         M._pick_display = lambda: ":0"
         M._panel_is_wide_gamut = lambda *_args: True
         M._panel_supports_hdr = lambda *_args: True
-        M._read_float_atom = lambda name: 1.0
-        M._write_float_atom = lambda name, value: True
-        M._write_string_atom = lambda name, value: True
+        M.vibrance_x11.read_float_atom = lambda name: 1.0
+        M.vibrance_x11.write_float_atom = lambda name, value: True
+        M.vibrance_x11.write_string_atom = lambda name, value: True
         with patch.object(asyncio, "sleep", no_wait):
             drain(M.Plugin()._start_when_ready())
         # Stops on the first repeat rather than reading forever.
@@ -513,7 +514,7 @@ class StartupSettles(IsolatedStartup):
         resume path uses is what makes it stick."""
         ladders = []
         M._pick_display = lambda: ":0"
-        M._count_gamescope_atoms = lambda display: 44
+        M.vibrance_x11.count_gamescope_atoms = lambda display: 44
         M.GAMESCOPE_SETTLE_S = 0
         M.Plugin._configure_for_panel = staticmethod(lambda *args: False)
         M.Plugin._schedule_reassert = lambda self: ladders.append("_reassert_repeatedly")
@@ -525,9 +526,9 @@ class StartupSettles(IsolatedStartup):
         our state - so an owned path has to be cleared, not assumed."""
         cleared = []
         path = os.path.join(M._runtime_dir(), "sdr-look-0.cube")
-        M._write_string_atom = lambda name, value: (
+        M.vibrance_x11.write_string_atom = lambda name, value: (
             cleared.append((name, value)) or True)
-        M._read_string_atom = lambda name: path
+        M.vibrance_x11.read_string_atom = lambda name: path
         M.Plugin._state["sdr_look_applied"] = True
         M.Plugin._sdr_look_path = path
         M.Plugin._release_look("sdr")
@@ -546,9 +547,9 @@ class StartupAssertsOff(IsolatedStartup):
         M._pick_display = lambda: ":0"
         M._panel_is_wide_gamut = lambda *_args: True
         M._panel_supports_hdr = lambda *_args: True
-        M._read_float_atom = lambda name: 1.0
-        M._write_float_atom = lambda name, value: True
-        M._count_gamescope_atoms = lambda display: 44
+        M.vibrance_x11.read_float_atom = lambda name: 1.0
+        M.vibrance_x11.write_float_atom = lambda name, value: True
+        M.vibrance_x11.count_gamescope_atoms = lambda display: 44
         own = {
             M.ATOM_LOOK_G22: os.path.join(
                 M._runtime_dir(), "sdr-look-0.cube"),
@@ -559,9 +560,9 @@ class StartupAssertsOff(IsolatedStartup):
             M.ATOM_LOOK_G22: "/tmp/foreign-sdr.cube",
             M.ATOM_LOOK_PQ: "/tmp/foreign-hdr.cube",
         }
-        M._read_string_atom = lambda name: (
+        M.vibrance_x11.read_string_atom = lambda name: (
             own if own_looks else foreign).get(name)
-        M._write_string_atom = lambda name, value: (
+        M.vibrance_x11.write_string_atom = lambda name, value: (
             written.append((name, value)) or True)
         M.settings._store.update({"sdr_enabled": sdr_on,
                                      "hdr_enabled": hdr_on})
@@ -599,7 +600,7 @@ class MonitorLatency(PluginCase):
             entered.set()
             release.wait(10)
             return ()
-        self.mock(M, "_foreign_sdr_values", side_effect=probe)
+        self.mock(M.vibrance_x11, "foreign_sdr_values", side_effect=probe)
         self.mock(M, "SUSPEND_POLL_S", 0.03)
         self.mock(M, "WATCH_INTERVAL_S", 0)
         self.mock(M, "PANEL_CHECK_INTERVAL_S", 10000)
@@ -654,9 +655,9 @@ class MonitorLatency(PluginCase):
         def run(command, **kwargs):
             self.assertEqual(command, ["xprop", "-root"])
             timeouts.append(kwargs["timeout"])
-            raise M.subprocess.TimeoutExpired(command, kwargs["timeout"])
-        self.mock(M, "_read_float_atom", side_effect=read)
-        self.mock(M.subprocess, "run", side_effect=run)
+            raise M.vibrance_x11.subprocess.TimeoutExpired(command, kwargs["timeout"])
+        self.mock(M.vibrance_x11, "read_float_atom", side_effect=read)
+        self.mock(M.vibrance_x11.subprocess, "run", side_effect=run)
         M.Plugin._state.update(sdr_enabled=True, sdr_applied=True)
         M.Plugin._last_sdr_written = 1.0
         watch = asyncio.create_task(self.plugin._watch_tick())
@@ -679,9 +680,9 @@ class SessionOwnership(PluginCase):
         self.mock(M, "_runtime_dir", return_value="/tmp")
         self.session = (":0", (1, 2, 3))
         self.mock(M.Plugin, "_session_identity", self.session)
-        self.identity = self.mock(M, "_display_session_identity", return_value=self.session)
+        self.identity = self.mock(M.vibrance_x11, "session_identity", return_value=self.session)
         self.mock(M, "_pick_display", return_value=":0")
-        self.mock(M, "_count_gamescope_atoms", return_value=44)
+        self.mock(M.vibrance_x11, "count_gamescope_atoms", return_value=44)
         self.mock(M.Plugin, "_configure_for_panel", return_value=False)
         self.mock(M.Plugin, "_schedule_reassert")
         self.mock(M, "GAMESCOPE_SETTLE_S", 0)
@@ -839,8 +840,8 @@ class StartupShutdown(PluginCase):
                 store.settings = json.loads(path.read_text(encoding="utf-8"))
             store.read = read
             self.mock(M, "settings", store)
-            blocked = {"writer": M._wait_for_lut_writer,
-                       "tls": M.updater.ssl_context, "settings": M._read_settings}[phase]
+            blocked = {"writer": M.vibrance_lutfile.wait_for_writer,
+                       "tls": M.updater.ssl_context, "settings": M.vibrance_settings.read}[phase]
             real_offload = M._offload
             async def offload(fn, *args):
                 if fn is blocked:
@@ -859,7 +860,7 @@ class StartupShutdown(PluginCase):
                 await startup
             recovery.assert_not_awaited()
             self.assertEqual(M.Plugin._tasks, [], "startup created tasks after unload")
-            self.assertTrue(M._lut_writes_disabled, "late startup reenabled LUT writes after unload")
+            self.assertTrue(M.vibrance_lutfile.disabled, "late startup reenabled LUT writes after unload")
 
     async def test_unload_while_waiting_for_writer_preserves_unread_settings(self):
         await self.stopped_startup("writer")
@@ -895,7 +896,7 @@ class MonitorAndResume(PluginCase):
         M.Plugin._disconnect()
         M.Plugin._state.update(sdr_enabled=True, sdr_saturation=1.4)
         self.mock(M, "_pick_display", return_value=":2")
-        self.mock(M, "_count_gamescope_atoms", return_value=44)
+        self.mock(M.vibrance_x11, "count_gamescope_atoms", return_value=44)
         self.mock(M, "GAMESCOPE_SETTLE_S", 0)
         self.mock(M.Plugin, "_configure_for_panel", return_value=False)
         self.mock(M.Plugin, "_capture_existing_looks")
@@ -925,8 +926,8 @@ class MonitorAndResume(PluginCase):
         M.Plugin._state["ready"] = True
         self.mock(M, "PANEL_CHECK_INTERVAL_S", 0)
         self.mock(M, "SUSPEND_POLL_S", 0)
-        timeout = subprocess.TimeoutExpired("xprop", M._xprop_timeout)
-        self.mock(M.subprocess, "run", side_effect=[
+        timeout = subprocess.TimeoutExpired("xprop", M.vibrance_x11.timeout)
+        self.mock(M.vibrance_x11.subprocess, "run", side_effect=[
             timeout, timeout, SimpleNamespace(stdout="GAMESCOPE_FOCUSED_APP(CARDINAL) = 0")])
         recovery = self.mock(self.plugin, "_start_when_ready")
         refresh = self.mock(self.plugin, "_refresh_panel", side_effect=asyncio.CancelledError())
@@ -934,7 +935,7 @@ class MonitorAndResume(PluginCase):
             await self.plugin._monitor_loop()
         recovery.assert_not_awaited()
         refresh.assert_awaited_once()
-        self.assertEqual(M.subprocess.run.call_count, 3)
+        self.assertEqual(M.vibrance_x11.subprocess.run.call_count, 3)
         self.assertTrue(M.Plugin._state["ready"])
         self.assertFalse(M.Plugin._disconnected)
 
@@ -1021,7 +1022,7 @@ class MonitorAndResume(PluginCase):
         events = []
         self.mock(self.plugin, "_schedule_reassert", side_effect=lambda: events.append("resume"))
         self.mock(M.Plugin, "_monitor_probe", side_effect=lambda: events.append("panel") or (44, None))
-        self.mock(M, "_display_session_identity", return_value=None)
+        self.mock(M.vibrance_x11, "session_identity", return_value=None)
         self.mock(self.plugin, "_refresh_panel")
         async def watch():
             events.append("watch")
@@ -1048,7 +1049,7 @@ class MonitorAndResume(PluginCase):
         self.mock(M, "PANEL_CHECK_INTERVAL_S", 0)
         self.mock(M, "WATCH_INTERVAL_S", 0)
         self.mock(M.Plugin, "_monitor_probe", return_value=(44, None))
-        self.mock(M, "_display_session_identity", return_value=None)
+        self.mock(M.vibrance_x11, "session_identity", return_value=None)
         self.mock(self.plugin, "_refresh_panel")
         self.mock(self.plugin, "_watch_tick", side_effect=[*watch_results, asyncio.CancelledError()])
         sleeps = 0
@@ -1097,7 +1098,7 @@ class MonitorAndResume(PluginCase):
 
     async def test_zero_atoms_during_settle_never_become_ready(self):
         self.mock(M, "_pick_display", return_value=":0")
-        self.mock(M, "_count_gamescope_atoms", side_effect=[0, 44, 44])
+        self.mock(M.vibrance_x11, "count_gamescope_atoms", side_effect=[0, 44, 44])
         self.mock(M, "GAMESCOPE_SETTLE_S", 0)
         self.mock(M, "GAMESCOPE_RETRY_FIRST_S", 0)
         self.mock(M.Plugin, "_capture_existing_looks")
@@ -1118,9 +1119,9 @@ class MonitorAndResume(PluginCase):
             selected = lines if len(command) == 2 else [line for line in lines
                 if any(line.startswith(atom + "(") for atom in command[2:])]
             return SimpleNamespace(stdout="\n".join(selected), returncode=0)
-        self.mock(M.subprocess, "run", side_effect=run)
-        self.mock(M, "_read_string_atom", side_effect=READ_STRING_ATOM)
-        self.mock(M, "_read_edid", return_value=edid_with_red(0.640, 0.330))
+        self.mock(M.vibrance_x11.subprocess, "run", side_effect=run)
+        self.mock(M.vibrance_x11, "read_string_atom", side_effect=READ_STRING_ATOM)
+        self.mock(M.vibrance_host, "read_edid", return_value=edid_with_red(0.640, 0.330))
         self.mock(M, "PANEL_CHECK_INTERVAL_S", 0)
         self.mock(M, "WATCH_INTERVAL_S", 10000)
         self.mock(M.Plugin, "_panel_cache_key", None)
@@ -1141,8 +1142,8 @@ class MonitorAndResume(PluginCase):
         self.assertFalse(M.Plugin._state["hdr_supported"])
 
     async def test_monitor_external_or_missing_metadata_never_adds_atom_queries(self):
-        read = self.mock(M, "_read_edid")
-        run = self.mock(M.subprocess, "run")
+        read = self.mock(M.vibrance_host, "read_edid")
+        run = self.mock(M.vibrance_x11.subprocess, "run")
         for out, expected in ((f'{M.ATOM_IS_EXTERNAL}(CARDINAL) = 1\n'
                                f'{M.ATOM_EDID_PATH}(UTF8_STRING) = "/tmp/external.bin"', True),
                               ('GAMESCOPE_FOCUSED_APP(CARDINAL) = 0', None)):
@@ -1157,11 +1158,11 @@ class MonitorAndResume(PluginCase):
         read.assert_not_called()
 
     async def test_monitor_reuses_string_decoding_and_cached_edid(self):
-        run = self.mock(M.subprocess, "run", return_value=SimpleNamespace(stdout=
+        run = self.mock(M.vibrance_x11.subprocess, "run", return_value=SimpleNamespace(stdout=
             f'{M.ATOM_IS_EXTERNAL}(CARDINAL) = 0\n'
             f'{M.ATOM_EDID_PATH}(UTF8_STRING) = "/tmp/a\\\"b\\\\c.bin"'))
-        self.mock(M, "_file_identity", return_value=(1, 2, 128, 3, 4))
-        read = self.mock(M, "_read_edid", return_value=edid_with_red(0.640, 0.330))
+        self.mock(M.vibrance_host, "file_identity", return_value=(1, 2, 128, 3, 4))
+        read = self.mock(M.vibrance_host, "read_edid", return_value=edid_with_red(0.640, 0.330))
         self.mock(M.Plugin, "_panel_cache_key", None)
         self.mock(M.Plugin, "_panel_cache_complete", False)
         _, probe = M.Plugin._monitor_probe()
@@ -1172,7 +1173,129 @@ class MonitorAndResume(PluginCase):
         self.assertIsNone(cached[2])
 
     async def test_failed_monitor_root_read_does_not_read_an_edid(self):
-        self.mock(M.subprocess, "run", side_effect=OSError("X unavailable"))
-        read = self.mock(M, "_read_edid")
+        self.mock(M.vibrance_x11.subprocess, "run", side_effect=OSError("X unavailable"))
+        read = self.mock(M.vibrance_host, "read_edid")
         self.assertIsNone(M.Plugin._monitor_probe())
         read.assert_not_called()
+
+
+class ReassertGuards(PluginCase):
+    def arm(self):
+        M.Plugin._state.update(sdr_enabled=True, sdr_saturation=1.5, sdr_applied=True,
+                               hdr_enabled=True, hdr_saturation=1.3, hdr_applied=True,
+                               hdr_applied_saturation=1.3)
+        M.Plugin._hdr_look_path = "/tmp/hdr-look-0.cube"
+        M.Plugin._last_sdr_written = 1.5
+        self.float_writer.reset_mock()
+        self.string_writer.reset_mock()
+
+    def test_a_look_whose_file_is_gone_is_not_pointed_at_again(self):
+        """gamescope would fail to open it and drop the look; the pending-look
+        retry rebuilds it instead."""
+        self.arm()
+        self.mock(M.vibrance_x11, "display_is_external", return_value=False)
+        self.mock(M.os.path, "exists", side_effect=lambda p: p != M.Plugin._hdr_look_path)
+        M.Plugin._reassert()
+        self.string_writer.assert_not_called()
+        self.float_writer.assert_called()               # the SDR half still goes back
+
+    def test_nothing_is_reasserted_while_known_docked_or_disconnected(self):
+        for flags in ({"external_display": True}, {"disconnected": True}):
+            with self.subTest(**flags):
+                self.arm()
+                M.Plugin._state["external_display"] = flags.get("external_display", False)
+                M.Plugin._disconnected = flags.get("disconnected", False)
+                # An older gamescope (or a failed read) cannot say it is docked.
+                with patch.object(M.vibrance_x11, "display_is_external", return_value=None):
+                    M.Plugin._reassert()
+                self.string_writer.assert_not_called()
+                self.float_writer.assert_not_called()
+
+
+class GamescopeBackoff(IsolatedStartup):
+    def test_waiting_for_gamescope_backs_off_to_the_ceiling(self):
+        delays = []
+        attempts = []
+
+        def absent_then_up():
+            attempts.append(1)
+            return ":0" if len(attempts) > 7 else None
+
+        async def record(seconds):
+            delays.append(seconds)
+
+        M._pick_display = absent_then_up
+        M._panel_is_wide_gamut = lambda *_args: True
+        M._panel_supports_hdr = lambda *_args: True
+        M.vibrance_x11.count_gamescope_atoms = lambda display: 44
+        with patch.object(asyncio, "sleep", record), patch.object(M.shutil, "which", return_value="/usr/bin/xprop"):
+            drain(M.Plugin()._start_when_ready(start_monitor=False))
+        first, ceiling = M.GAMESCOPE_RETRY_FIRST_S, M.GAMESCOPE_RETRY_MAX_S
+        expected = [min(first * 2 ** n, ceiling) for n in range(7)]
+        self.assertEqual(delays[:7], expected)
+
+
+class UnreadableIdentity(PluginCase):
+    def stub_connect(self, identity):
+        self.mock(M.vibrance_x11, "session_identity", return_value=identity)
+        self.mock(M, "_pick_display", return_value=":0")
+        self.mock(M.vibrance_x11, "count_gamescope_atoms", return_value=44)
+        self.mock(M, "GAMESCOPE_SETTLE_S", 0)
+        self.mock(M.Plugin, "_configure_for_panel", return_value=False)
+        self.mock(M.Plugin, "_capture_existing_looks")
+        self.mock(self.plugin, "_reassert_repeatedly", return_value=None)
+
+    async def test_an_unreadable_identity_twice_is_still_not_the_same_session(self):
+        M.Plugin._session_identity = None             # the last connect could not read it either
+        M.Plugin._disconnected = True
+        M.Plugin._hdr_look_baseline = "/somebody/else.cube"
+        M.Plugin._sdr_baseline = 0.4
+        self.stub_connect(None)
+        await self.plugin._start_when_ready(start_monitor=False)
+        await self.drain()
+        self.assertIsNone(M.Plugin._hdr_look_baseline)
+        self.assertNotEqual(M.Plugin._sdr_baseline, 0.4)
+
+
+class MonitorCadence(PluginCase):
+    def run_ticks(self, ticks):
+        clock = itertools.count()
+        # Not time.monotonic itself: the event loop reads that clock too.
+        self.mock(M, "time", SimpleNamespace(monotonic=lambda: float(next(clock))))
+        self.mock(M, "_boottime", side_effect=lambda: 0.0)   # never ahead: no resume
+        sleeps = 0
+
+        async def sleep(_delay):
+            nonlocal sleeps
+            sleeps += 1
+            if sleeps > ticks:
+                raise asyncio.CancelledError()
+        self.mock(M.asyncio, "sleep", side_effect=sleep)
+
+    async def test_an_unreadable_socket_is_not_a_new_session(self):
+        M.Plugin._session_identity = (":0", (1, 1))
+        self.mock(M.vibrance_x11, "session_identity", return_value=None)
+        self.mock(M, "PANEL_CHECK_INTERVAL_S", 0)
+        self.mock(M, "SUSPEND_POLL_S", 0)
+        self.mock(M.Plugin, "_monitor_probe", return_value=(44, None))
+        # Either path ends the loop, so a regression fails instead of spinning.
+        recovery = self.mock(self.plugin, "_start_when_ready", side_effect=asyncio.CancelledError())
+        refresh = self.mock(self.plugin, "_refresh_panel", side_effect=asyncio.CancelledError())
+        with self.assertRaises(asyncio.CancelledError):
+            await self.plugin._monitor_loop()
+        recovery.assert_not_awaited()
+        refresh.assert_awaited_once()
+        self.assertEqual(M.Plugin._sdr_baseline, 0.4)
+
+    async def test_the_panel_is_probed_every_interval_and_a_failed_save_retried(self):
+        self.mock(M, "PANEL_CHECK_INTERVAL_S", 5.0)
+        self.mock(M, "WATCH_INTERVAL_S", 1000.0)
+        self.mock(M.vibrance_x11, "session_identity", return_value=None)
+        probe = self.mock(M.Plugin, "_monitor_probe", return_value=(44, None))
+        self.mock(self.plugin, "_refresh_panel")
+        retry = self.mock(self.plugin, "_retry_settings_save")
+        self.run_ticks(20)                                 # 20 one-second ticks
+        with self.assertRaises(asyncio.CancelledError):
+            await self.plugin._monitor_loop()
+        self.assertEqual(probe.call_count, 4)
+        self.assertEqual(retry.call_count, 4)

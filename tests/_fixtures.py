@@ -22,10 +22,10 @@ _harness.install()
 import main as M  # noqa: E402
 
 # Never the machine's own panel: a laptop running the suite has an eDP EDID.
-M.DRM_SYSFS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-such-drm")
+M.vibrance_host.DRM_SYSFS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-such-drm")
 
 # Unpatched originals, captured at import before any test replaces them.
-READ_STRING_ATOM = M._read_string_atom
+READ_STRING_ATOM = M.vibrance_x11.read_string_atom
 SAVE_SETTINGS = M.Plugin._save
 PATH_EXISTS = M.os.path.exists
 WRITE_LOOK = M._write_look
@@ -100,7 +100,9 @@ class StateGuard:
     """
 
     def run(self, result=None):
-        saved = [_snapshot(M.Plugin), _snapshot(M)]
+        saved = [_snapshot(M.Plugin), _snapshot(M), _snapshot(M.vibrance_lutfile),
+                 _snapshot(M.vibrance_x11), _snapshot(M.vibrance_host),
+                 _snapshot(M.vibrance_settings)]
         try:
             return super().run(result)
         finally:
@@ -137,20 +139,20 @@ class PluginCase(StateGuard, unittest.IsolatedAsyncioTestCase):
         ).items():
             self.mock(M.Plugin, key, value)
         self.mock(M.Plugin, "_save")
-        self.mock(M, "_lut_writes_disabled", False)
-        self.mock(M, "_xprop_timeout", 3.0)
+        self.mock(M.vibrance_lutfile, "disabled", False)
+        self.mock(M.vibrance_x11, "timeout", 3.0)
         self.mock(M, "DEBOUNCE_S", 0)
         self.mock(M, "SDR_COALESCE_S", 0)
         self.mock(M, "SETTINGS_RETRY_S", 0.01)
         self.mock(M, "SDR_NEUTRAL_ATOM", 1.0)
         self.mock(M, "SDR_ATOM_SPAN", 2.0)
-        self.mock(M, "_foreign_sdr_values", return_value=())
+        self.mock(M.vibrance_x11, "foreign_sdr_values", return_value=())
         self.live_sdr = 0.8
         self.strings = {}
-        self.float_writer = self.mock(M, "_write_float_atom", side_effect=self.write_float)
-        self.mock(M, "_read_float_atom", side_effect=lambda _: self.live_sdr)
-        self.string_writer = self.mock(M, "_write_string_atom", side_effect=self.write_string)
-        self.mock(M, "_read_string_atom", side_effect=lambda atom: self.strings.get(atom))
+        self.float_writer = self.mock(M.vibrance_x11, "write_float_atom", side_effect=self.write_float)
+        self.mock(M.vibrance_x11, "read_float_atom", side_effect=lambda _: self.live_sdr)
+        self.string_writer = self.mock(M.vibrance_x11, "write_string_atom", side_effect=self.write_string)
+        self.mock(M.vibrance_x11, "read_string_atom", side_effect=lambda atom: self.strings.get(atom))
         self.mock(M.os.path, "isfile", return_value=True)
         self.mock(M.os.path, "exists", return_value=True)
         # The fake builder's files live here, so the plugin knows them as its own.

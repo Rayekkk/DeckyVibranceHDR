@@ -244,16 +244,16 @@ class Lut(PluginTest):
         with tempfile.TemporaryDirectory() as folder:
             missing = os.path.join(folder, "gone", "runtime")
             with patch.object(M, "_runtime_dir", return_value=missing), \
-                    patch.object(M, "_generate_lut") as build, \
-                    patch.object(M, "_lut_writes_disabled", False):
+                    patch.object(M.vibrance_lutfile, "generate") as build, \
+                    patch.object(M.vibrance_lutfile, "disabled", False):
                 self.assertEqual(M._write_look(1.3, 0), "")
             build.assert_not_called()
 
     def test_an_unexpected_build_error_leaves_no_temporary_file(self):
         with tempfile.TemporaryDirectory() as folder:
             with patch.object(M, "_runtime_dir", return_value=folder), \
-                    patch.object(M, "_generate_lut", side_effect=TypeError("bad request")), \
-                    patch.object(M, "_lut_writes_disabled", False):
+                    patch.object(M.vibrance_lutfile, "generate", side_effect=TypeError("bad request")), \
+                    patch.object(M.vibrance_lutfile, "disabled", False):
                 self.assertEqual(M._write_look(1.3, 0), "")
             self.assertEqual(os.listdir(folder), [])
 
@@ -277,7 +277,7 @@ class Lut(PluginTest):
         with self.assertRaises(V.BuildCancelled):
             V.generate(1.3, cancelled=lambda: True)
         with tempfile.TemporaryDirectory() as folder, patch.object(M, "_runtime_dir", return_value=folder), \
-                patch.object(M, "_lut_writes_disabled", False):
+                patch.object(M.vibrance_lutfile, "disabled", False):
             path = os.path.join(folder, "hdr-look-1.cube")
             with open(path, "w") as f:
                 f.write("old")
@@ -294,8 +294,8 @@ class Lut(PluginTest):
     def test_job_superseded_while_waiting_for_file_lock_never_generates(self):
         cancelled = threading.Event()
         result = []
-        with patch.object(M, "_lut_writes_disabled", False), patch.object(V, "generate") as generate:
-            with M._lut_file_lock:
+        with patch.object(M.vibrance_lutfile, "disabled", False), patch.object(V, "generate") as generate:
+            with M.vibrance_lutfile.lock:
                 worker = threading.Thread(target=lambda: result.append(M._write_look(1.3, 1, cancelled=cancelled.is_set)))
                 worker.start()
                 cancelled.set()
@@ -325,80 +325,80 @@ class LutOutput(PluginTest):
 
 class NativeLut(PluginTest):
     def test_native_output_matches_both_transfers_and_white_points(self):
-        with patch.object(M, '_native_lut_python', return_value=sys.executable), patch.object(M, '_lut_writes_disabled', False):
+        with patch.object(M.vibrance_host, "native_python", return_value=sys.executable), patch.object(M.vibrance_lutfile, 'disabled', False):
             for encoding, white in (('pq', V.D65), ('g22', V.D65), ('g22', (.30, .32))):
-                self.assertEqual(M._generate_lut(1.37, 9, encoding, white, lambda: False),
+                self.assertEqual(M.vibrance_lutfile.generate(1.37, 9, encoding, white, lambda: False),
                                  V.generate(1.37, 9, encoding, white))
 
     def test_platform_selection_preserves_ordinary_steamos(self):
         def elf(machine):
             return b'\x7fELF\x02\x01' + bytes(12) + machine.to_bytes(2, 'little')
-        self.addCleanup(M._interpreter_headers.cache_clear)  # leave no fake headers behind
+        self.addCleanup(M.vibrance_host.interpreter_headers.cache_clear)  # leave no fake headers behind
         with patch.object(M.sys, 'frozen', True, create=True):
             for native, loader, expected in ((183, 62, '/proc/self/root/usr/bin/python3'), (62, 62, None), (183, 183, None)):
-                M._interpreter_headers.cache_clear()  # cached in the plugin; each case reads afresh
+                M.vibrance_host.interpreter_headers.cache_clear()  # cached in the plugin; each case reads afresh
                 with patch('builtins.open', side_effect=[io.BytesIO(elf(native)), io.BytesIO(elf(loader))]):
-                    self.assertEqual(M._native_lut_python(), expected)
+                    self.assertEqual(M.vibrance_host.native_python(), expected)
 
     def test_a_passing_read_error_is_not_remembered(self):
-        M._interpreter_headers.cache_clear()
-        self.addCleanup(M._interpreter_headers.cache_clear)
+        M.vibrance_host.interpreter_headers.cache_clear()
+        self.addCleanup(M.vibrance_host.interpreter_headers.cache_clear)
         arm = b'ELF' + bytes(12) + (183).to_bytes(2, 'little')
         x86 = b'ELF' + bytes(12) + (62).to_bytes(2, 'little')
         with patch('builtins.open', side_effect=[OSError(24, "Too many open files"),
                                                  io.BytesIO(arm), io.BytesIO(x86)]):
-            self.assertIsNone(M._native_lut_python())
-            self.assertEqual(M._native_lut_python(), '/proc/self/root/usr/bin/python3')
+            self.assertIsNone(M.vibrance_host.native_python())
+            self.assertEqual(M.vibrance_host.native_python(), '/proc/self/root/usr/bin/python3')
 
     def test_native_worker_is_killed_and_reaped_on_cancel(self):
         worker = MagicMock()
         worker.__enter__.return_value = worker
         worker.poll.return_value = None
         worker.communicate.side_effect = [subprocess.TimeoutExpired('python', .05), (b'', b'')]
-        with patch.object(M, '_native_lut_python', return_value=sys.executable), patch.object(M, '_lut_writes_disabled', False), patch.object(M.subprocess, 'Popen', return_value=worker), patch.object(M, '_system_env', return_value={'PYTHONHOME': 'bad', 'PYTHONPATH': 'bad'}) as env:
+        with patch.object(M.vibrance_host, "native_python", return_value=sys.executable), patch.object(M.vibrance_lutfile, 'disabled', False), patch.object(M.vibrance_x11.subprocess, 'Popen', return_value=worker), patch.object(M.vibrance_host, "system_env", return_value={'PYTHONHOME': 'bad', 'PYTHONPATH': 'bad'}) as env:
             cancelled = iter((False, False, True))
             with self.assertRaises(V.BuildCancelled):
-                M._generate_lut(1.2, 33, 'pq', V.D65, lambda: next(cancelled))
+                M.vibrance_lutfile.generate(1.2, 33, 'pq', V.D65, lambda: next(cancelled))
             worker.kill.assert_called_once()
             self.assertEqual(worker.communicate.call_count, 2)
             self.assertEqual(env.return_value, {})
 
     def test_validation_and_worker_failure_reject_partial_output(self):
-        with patch.object(M, '_native_lut_python', return_value=sys.executable), patch.object(M, '_lut_writes_disabled', False):
+        with patch.object(M.vibrance_host, "native_python", return_value=sys.executable), patch.object(M.vibrance_lutfile, 'disabled', False):
             for saturation, size in ((True, 33), (1.2, True), (float('nan'), 33)):
                 with self.assertRaises(ValueError):
-                    M._generate_lut(saturation, size, 'pq', V.D65, lambda: False)
+                    M.vibrance_lutfile.generate(saturation, size, 'pq', V.D65, lambda: False)
             worker = MagicMock()
             worker.__enter__.return_value = worker
             worker.communicate.return_value = (b'partial', b'error')
             worker.returncode = 1
             worker.poll.return_value = 1
-            with patch.object(M.subprocess, 'Popen', return_value=worker):
+            with patch.object(M.vibrance_x11.subprocess, 'Popen', return_value=worker):
                 with self.assertRaisesRegex(ValueError, 'worker failed'):
-                    M._generate_lut(1.2, 33, 'pq', V.D65, lambda: False)
+                    M.vibrance_lutfile.generate(1.2, 33, 'pq', V.D65, lambda: False)
 
     def test_steamos_keeps_existing_generator_and_xprop_invocation(self):
-        with patch.object(M, "_native_lut_python", return_value=None), patch.object(V, "generate", return_value="original") as generate, patch.object(M.subprocess, "run") as run:
-            self.assertEqual(M._generate_lut(1.2, 33, "pq", V.D65, lambda: False), "original")
+        with patch.object(M.vibrance_host, "native_python", return_value=None), patch.object(V, "generate", return_value="original") as generate, patch.object(M.vibrance_x11.subprocess, "run") as run:
+            self.assertEqual(M.vibrance_lutfile.generate(1.2, 33, "pq", V.D65, lambda: False), "original")
             generate.assert_called_once()
-            M._run_xprop(["xprop", "-root"], timeout=3)
+            M.vibrance_x11.run_xprop(["xprop", "-root"], timeout=3)
             run.assert_called_once_with(["xprop", "-root"], timeout=3)
 
     def test_arm_xprop_uses_absolute_host_binary_and_posix_spawn(self):
-        with patch.object(M, "_native_lut_python", return_value="native"), patch.object(M.subprocess, "run") as run:
-            M._run_xprop(["xprop", "-root", "ATOM"], timeout=3)
+        with patch.object(M.vibrance_host, "native_python", return_value="native"), patch.object(M.vibrance_x11.subprocess, "run") as run:
+            M.vibrance_x11.run_xprop(["xprop", "-root", "ATOM"], timeout=3)
             run.assert_called_once_with(["/proc/self/root/usr/bin/xprop", "-root", "ATOM"], timeout=3, close_fds=False)
 
     def test_native_worker_deadline_kills_and_reaps_instead_of_hanging(self):
         worker = MagicMock()
         worker.__enter__.return_value = worker
         worker.poll.return_value = None
-        with patch.object(M, "_native_lut_python", return_value=sys.executable), \
-                patch.object(M, "_lut_writes_disabled", False), \
-                patch.object(M.subprocess, "Popen", return_value=worker), \
+        with patch.object(M.vibrance_host, "native_python", return_value=sys.executable), \
+                patch.object(M.vibrance_lutfile, "disabled", False), \
+                patch.object(M.vibrance_x11.subprocess, "Popen", return_value=worker), \
                 patch.object(M.time, "monotonic", side_effect=[0, 31]):
             with self.assertRaisesRegex(ValueError, "worker timed out"):
-                M._generate_lut(1.2, 33, "pq", V.D65, lambda: False)
+                M.vibrance_lutfile.generate(1.2, 33, "pq", V.D65, lambda: False)
         worker.kill.assert_called_once()
         worker.communicate.assert_called_once_with()
 
@@ -408,9 +408,9 @@ class CompletedSlots(PluginTest):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         for target, name, value in ((M, "_runtime_dir", lambda: folder.name),
-                                    (M, "LUT_SIZE", 5),
-                                    (M, "_lut_writes_disabled", False),
-                                    (M, "_look_file_cache", OrderedDict())):
+                                    (M.vibrance_lutfile, "SIZE", 5),
+                                    (M.vibrance_lutfile, "disabled", False),
+                                    (M.vibrance_lutfile, "_cache", OrderedDict())):
             patcher = patch.object(target, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
@@ -433,7 +433,7 @@ class CompletedSlots(PluginTest):
             M._write_look(1.2, 0, "g22")
             M._write_look(1.2, 0, "g22", source_white=(0.30, 0.32))
             M._write_look(1.2, 0, "pq", source_white=(0.30, 0.32))
-            with patch.object(M, "LUT_SIZE", 6):
+            with patch.object(M.vibrance_lutfile, "SIZE", 6):
                 path = M._write_look(1.2, 0, "pq", source_white=(0.30, 0.32))
             self.assertIn("LUT_3D_SIZE 6", Path(path).read_text())
             self.assertEqual(generate.call_count, 4)
@@ -454,16 +454,16 @@ class CompletedSlots(PluginTest):
 
     def test_cached_hit_honors_cancellation_and_unload_without_writing(self):
         path = Path(M._write_look(1.2, 0))
-        original = M._file_identity(path)
+        original = M.vibrance_host.file_identity(path)
         with patch.object(V, "generate", wraps=V.generate) as generate, \
                 patch.object(M.os, "replace") as replace:
             self.assertEqual(M._write_look(1.2, 0, cancelled=lambda: True), "")
-            with patch.object(M, "_lut_writes_disabled", True):
+            with patch.object(M.vibrance_lutfile, "disabled", True):
                 self.assertEqual(M._write_look(1.2, 0), "")
             checks = iter((False, True))
             self.assertEqual(M._write_look(1.2, 0, cancelled=lambda: next(checks)), "")
             self.assertEqual(M._write_look(1.2, 0), str(path))
-            self.assertEqual(M._file_identity(path), original)
+            self.assertEqual(M.vibrance_host.file_identity(path), original)
             generate.assert_not_called()
             replace.assert_not_called()
 
@@ -471,17 +471,17 @@ class CompletedSlots(PluginTest):
         with patch.object(V, "generate", wraps=V.generate) as generate:
             for i in range(6):
                 M._write_look(1.2, 0, prefix=f"slot-{i}")
-            self.assertEqual(len(M._look_file_cache), 4)
+            self.assertEqual(len(M.vibrance_lutfile._cache), 4)
             M._write_look(1.2, 0, prefix="slot-5")
             self.assertEqual(generate.call_count, 6)
             M._write_look(1.2, 0, prefix="slot-0")
             self.assertEqual(generate.call_count, 7)
-            self.assertEqual(len(M._look_file_cache), 4)
+            self.assertEqual(len(M.vibrance_lutfile._cache), 4)
 
     def test_cache_does_not_bypass_saturation_or_size_type_validation(self):
         path = Path(M._write_look(1.0, 0))
         original = path.read_bytes()
         self.assertEqual(M._write_look(True, 0), "")
-        with patch.object(M, "LUT_SIZE", 5.0):
+        with patch.object(M.vibrance_lutfile, "SIZE", 5.0):
             self.assertEqual(M._write_look(1.0, 0), "")
         self.assertEqual(path.read_bytes(), original)

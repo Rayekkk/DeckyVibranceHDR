@@ -12,7 +12,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, cpSync, readFileSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, cpSync, readFileSync, readdirSync, renameSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -31,8 +31,8 @@ const pendingZip = join(buildDir, "release.zip");
 /** Runtime payload only - no sources, lockfiles, git, node_modules, or tests. */
 const CONTENTS = [
   "main.py",
-  "vibrance_lut.py",
-  "vibrance_edid.py",
+  // Every backend module, so a new one cannot be left out of the package.
+  ...readdirSync(repoRoot).filter(name => /^vibrance_\w+\.py$/.test(name)).sort(),
   "lego_updater.py",
   "plugin.json",
   "package.json",

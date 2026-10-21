@@ -19,21 +19,21 @@ class AtomEncoding(PluginTest):
 
     def test_float_round_trip(self):
         for value in (0.0, 0.5, 1.0, 1.3, 1.5):
-            raw = M._float_to_cardinal(value)
-            self.assertAlmostEqual(M._cardinal_to_float(raw), value, places=6)
+            raw = M.vibrance_x11.float_to_cardinal(value)
+            self.assertAlmostEqual(M.vibrance_x11.cardinal_to_float(raw), value, places=6)
 
     def test_matches_gamescope_encoding(self):
         # 1.0 as a float is this exact CARDINAL; vibrantDeck writes the same.
-        self.assertEqual(M._float_to_cardinal(1.0), 1065353216)
-        self.assertAlmostEqual(M._cardinal_to_float(1065353216), 1.0, places=6)
+        self.assertEqual(M.vibrance_x11.float_to_cardinal(1.0), 1065353216)
+        self.assertAlmostEqual(M.vibrance_x11.cardinal_to_float(1065353216), 1.0, places=6)
 
     def test_negative_values_use_the_unsigned_bit_pattern(self):
         # SDR_UNSET is written back to gamescope, and xprop's 32c is unsigned.
-        self.assertEqual(M._float_to_cardinal(M.SDR_UNSET), 0xBF800000)
-        self.assertEqual(M._cardinal_to_float(0xBF800000), M.SDR_UNSET)
+        self.assertEqual(M.vibrance_x11.float_to_cardinal(M.SDR_UNSET), 0xBF800000)
+        self.assertEqual(M.vibrance_x11.cardinal_to_float(0xBF800000), M.SDR_UNSET)
 
     def test_none_does_not_raise(self):
-        self.assertIsNone(M._cardinal_to_float(None))
+        self.assertIsNone(M.vibrance_x11.cardinal_to_float(None))
 
 
 class Environment(PluginTest):
@@ -43,10 +43,10 @@ class Environment(PluginTest):
         os.environ["LD_LIBRARY_PATH"] = "/steam/lib"
         os.environ["LD_PRELOAD"] = "/steam/preload.so"
         try:
-            env = M._system_env()
+            env = M.vibrance_x11.system_env()
             self.assertNotIn("LD_LIBRARY_PATH", env)
             self.assertNotIn("LD_PRELOAD", env)
-            self.assertEqual(env["DISPLAY"], M.DISPLAY)
+            self.assertEqual(env["DISPLAY"], M.vibrance_x11.DISPLAY)
             self.assertTrue(env["PATH"])
         finally:
             os.environ.pop("LD_LIBRARY_PATH", None)
@@ -60,12 +60,12 @@ class XpropPaths(PluginTest):
                  (r'"/tmp/\305\201\303\263d\305\272.cube"', '/tmp/Łódź.cube'),
                  ('"/tmp/kolory-Łódź.cube"', '/tmp/kolory-Łódź.cube')]
         for wire, expected in cases:
-            with patch.object(M.subprocess, "run", return_value=SimpleNamespace(stdout="ATOM(UTF8_STRING) = " + wire)):
-                self.assertEqual(M._read_string_atom(M.ATOM_LOOK_G22), expected)
+            with patch.object(M.vibrance_x11.subprocess, "run", return_value=SimpleNamespace(stdout="ATOM(UTF8_STRING) = " + wire)):
+                self.assertEqual(M.vibrance_x11.read_string_atom(M.ATOM_LOOK_G22), expected)
 
     def test_embedded_null_is_not_a_filename(self):
-        with patch.object(M.subprocess, "run", return_value=SimpleNamespace(stdout=r'ATOM = "/tmp/a\000b"')):
-            self.assertIsNone(M._read_string_atom(M.ATOM_EDID_PATH))
+        with patch.object(M.vibrance_x11.subprocess, "run", return_value=SimpleNamespace(stdout=r'ATOM = "/tmp/a\000b"')):
+            self.assertIsNone(M.vibrance_x11.read_string_atom(M.ATOM_EDID_PATH))
 
 
 class AtomWrites(PluginTest):
@@ -73,67 +73,67 @@ class AtomWrites(PluginTest):
     a wrong format letter would otherwise go unnoticed until a device run."""
 
     def setUp(self):
-        self.run = patch.object(M.subprocess, "run").start()
+        self.run = patch.object(M.vibrance_x11.subprocess, "run").start()
         self.addCleanup(patch.stopall)
-        patch.object(M, "_native_lut_python", return_value=None).start()
-        M.DISPLAY = ":7"
+        patch.object(M.vibrance_host, "native_python", return_value=None).start()
+        M.vibrance_x11.DISPLAY = ":7"
 
     def test_the_sdr_float_goes_out_as_a_32_bit_cardinal(self):
-        self.assertTrue(M._write_float_atom(M.ATOM_SDR_WIDENESS, 1.0))
+        self.assertTrue(M.vibrance_x11.write_float_atom(M.ATOM_SDR_WIDENESS, 1.0))
         command = self.run.call_args.args[0]
         self.assertEqual(command, ["xprop", "-root", "-f", M.ATOM_SDR_WIDENESS, "32c",
                                    "-set", M.ATOM_SDR_WIDENESS, "1065353216"])
         kwargs = self.run.call_args.kwargs
         self.assertTrue(kwargs["check"])
         self.assertEqual(kwargs["env"]["DISPLAY"], ":7")
-        self.assertEqual(kwargs["timeout"], M._xprop_timeout)
+        self.assertEqual(kwargs["timeout"], M.vibrance_x11.timeout)
 
     def test_a_look_path_goes_out_as_utf8_unchanged(self):
         path = "/home/deck/.local/share/look dir/żółw.cube"
-        self.assertTrue(M._write_string_atom(M.ATOM_LOOK_PQ, path))
+        self.assertTrue(M.vibrance_x11.write_string_atom(M.ATOM_LOOK_PQ, path))
         self.assertEqual(self.run.call_args.args[0],
                          ["xprop", "-root", "-f", M.ATOM_LOOK_PQ, "8u", "-set", M.ATOM_LOOK_PQ, path])
 
     def test_a_failing_or_hanging_xprop_is_a_failed_write(self):
-        for failure in (M.subprocess.CalledProcessError(1, "xprop"),
-                        M.subprocess.TimeoutExpired("xprop", 3), FileNotFoundError("xprop")):
+        for failure in (M.vibrance_x11.subprocess.CalledProcessError(1, "xprop"),
+                        M.vibrance_x11.subprocess.TimeoutExpired("xprop", 3), FileNotFoundError("xprop")):
             with self.subTest(failure=type(failure).__name__):
                 self.run.side_effect = failure
-                self.assertFalse(M._write_string_atom(M.ATOM_LOOK_G22, "/x.cube"))
+                self.assertFalse(M.vibrance_x11.write_string_atom(M.ATOM_LOOK_G22, "/x.cube"))
 
 
 class CrossServerWriter(PluginTest):
 
     def setUp(self):
-        self.real_run, self.real_display = M.subprocess.run, M.DISPLAY
-        self.real_displays = M.DISPLAYS
-        M.DISPLAY, M.DISPLAYS = ":0", (":0", ":1")
+        self.real_run, self.real_display = M.vibrance_x11.subprocess.run, M.vibrance_x11.DISPLAY
+        self.real_displays = M.vibrance_x11.DISPLAYS
+        M.vibrance_x11.DISPLAY, M.vibrance_x11.DISPLAYS = ":0", (":0", ":1")
 
     def tearDown(self):
-        M.subprocess.run, M.DISPLAY = self.real_run, self.real_display
-        M.DISPLAYS = self.real_displays
+        M.vibrance_x11.subprocess.run, M.vibrance_x11.DISPLAY = self.real_run, self.real_display
+        M.vibrance_x11.DISPLAYS = self.real_displays
 
     def _serve(self, by_display):
         class Result:
             def __init__(self, stdout):
                 self.stdout, self.returncode = stdout, 0
 
-        M.subprocess.run = lambda cmd, **kw: Result(
+        M.vibrance_x11.subprocess.run = lambda cmd, **kw: Result(
             by_display.get(kw["env"]["DISPLAY"], f"{cmd[-1]}:  not found."))
 
     def test_the_server_we_use_is_not_evidence_against_itself(self):
         self._serve({":0": f"{M.ATOM_SDR_WIDENESS}(CARDINAL) = 1065353216"})
-        self.assertEqual(M._foreign_sdr_values(), ())
+        self.assertEqual(M.vibrance_x11.foreign_sdr_values(), ())
 
     def test_the_atom_turning_up_elsewhere_is_reported_with_its_value(self):
         self._serve({":1": f"{M.ATOM_SDR_WIDENESS}(CARDINAL) = 1056964608"})
-        self.assertEqual(M._foreign_sdr_values(), ((":1", "1056964608"),))
+        self.assertEqual(M.vibrance_x11.foreign_sdr_values(), ((":1", "1056964608"),))
 
     def test_an_unreadable_server_is_no_reading_at_all(self):
         def run(cmd, **kw):
-            raise M.subprocess.TimeoutExpired(cmd, kw["timeout"])
-        M.subprocess.run = run
-        self.assertIsNone(M._foreign_sdr_values())
+            raise M.vibrance_x11.subprocess.TimeoutExpired(cmd, kw["timeout"])
+        M.vibrance_x11.subprocess.run = run
+        self.assertIsNone(M.vibrance_x11.foreign_sdr_values())
 
 
 class DisplayChoice(PluginTest):
@@ -152,30 +152,30 @@ class DisplayChoice(PluginTest):
                            "GAMESCOPE_VROVERLAY_FORWARDING(CARDINAL) = 1"])
 
     def setUp(self):
-        self.real_run = M.subprocess.run
-        self.real_display = M.DISPLAY
-        self.real_displays = M.DISPLAYS
+        self.real_run = M.vibrance_x11.subprocess.run
+        self.real_display = M.vibrance_x11.DISPLAY
+        self.real_displays = M.vibrance_x11.DISPLAYS
         self.real_listdir = M.os.listdir
         # The two XWayland sockets gamescope opens. Without this the tests read
         # the real /tmp/.X11-unix and fail on any machine with its own X server.
         M.os.listdir = lambda path: ["X0", "X1"]
 
     def tearDown(self):
-        M.subprocess.run = self.real_run
-        M.DISPLAY = self.real_display
-        M.DISPLAYS = self.real_displays
+        M.vibrance_x11.subprocess.run = self.real_run
+        M.vibrance_x11.DISPLAY = self.real_display
+        M.vibrance_x11.DISPLAYS = self.real_displays
         M.os.listdir = self.real_listdir
 
     def test_servers_come_from_the_sockets_not_a_guess(self):
         M.os.listdir = lambda path: ["X2", "X3", "Xnope", ".lock"]
-        self.assertEqual(M._display_candidates(), (":2", ":3"))
+        self.assertEqual(M.vibrance_x11.display_candidates(), (":2", ":3"))
 
     def test_an_unreadable_socket_directory_falls_back(self):
         def boom(path):
             raise OSError("no such directory")
 
         M.os.listdir = boom
-        self.assertEqual(M._display_candidates(), M.DISPLAY_FALLBACK)
+        self.assertEqual(M.vibrance_x11.display_candidates(), M.vibrance_x11.FALLBACK)
 
     def test_a_desktop_holding_zero_pushes_gamescope_along(self):
         """The numbering is not fixed, so :0 is not necessarily gamescope."""
@@ -192,17 +192,17 @@ class DisplayChoice(PluginTest):
         def fake_run(cmd, **kwargs):
             return Result(by_display.get(kwargs["env"]["DISPLAY"], ""))
 
-        M.subprocess.run = fake_run
+        M.vibrance_x11.subprocess.run = fake_run
 
     def test_picks_the_server_holding_the_controls(self):
         self._serve({":0": self.SECONDARY, ":1": self.PRIMARY})
         self.assertEqual(M._pick_display(), ":1")
-        self.assertEqual(M.DISPLAY, ":1")
+        self.assertEqual(M.vibrance_x11.DISPLAY, ":1")
 
     def test_picks_the_other_way_round_just_as_happily(self):
         self._serve({":0": self.PRIMARY, ":1": self.SECONDARY})
         self.assertEqual(M._pick_display(), ":0")
-        self.assertEqual(M.DISPLAY, ":0")
+        self.assertEqual(M.vibrance_x11.DISPLAY, ":0")
 
     def test_a_repeated_search_logs_only_what_changed(self):
         """Without gamescope (Desktop Mode) the search repeats for hours."""
@@ -240,19 +240,19 @@ class DisplayChoice(PluginTest):
 
     def test_only_gamescope_atoms_are_counted(self):
         self._serve({":0": 'WM_NAME(STRING) = "x"\n_NET_SUPPORTED(ATOM) = 1'})
-        self.assertEqual(M._count_gamescope_atoms(":0"), 0)
+        self.assertEqual(M.vibrance_x11.count_gamescope_atoms(":0"), 0)
 
 
 class SocketIdentity(PluginTest):
     def test_identity_detects_replacement_at_same_display_and_missing_path(self):
-        with tempfile.TemporaryDirectory() as folder, patch.object(M, "X11_SOCKET_DIR", folder), \
-                patch.object(M, "DISPLAY", ":12"):
+        with tempfile.TemporaryDirectory() as folder, patch.object(M.vibrance_x11, "SOCKET_DIR", folder), \
+                patch.object(M.vibrance_x11, "DISPLAY", ":12"):
             socket = Path(folder) / "X12"
             socket.write_text("first socket fixture")
-            first = M._display_session_identity()
+            first = M.vibrance_x11.session_identity()
             replacement = Path(folder) / "replacement"
             replacement.write_text("new socket fixture")
             replacement.replace(socket)
-            self.assertNotEqual(M._display_session_identity(), first)
+            self.assertNotEqual(M.vibrance_x11.session_identity(), first)
             socket.unlink()
-            self.assertIsNone(M._display_session_identity())
+            self.assertIsNone(M.vibrance_x11.session_identity())

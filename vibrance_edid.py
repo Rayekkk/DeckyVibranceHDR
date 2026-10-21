@@ -119,8 +119,9 @@ def supports_pq(blob: bytes):
 
     None only when the EDID itself cannot be trusted - incomplete, failing a
     checksum or malformed inside an extension. A complete EDID that never
-    mentions PQ is a definite no, because that is the only place it could have
-    been said.
+    mentions PQ is a definite no for that EDID. gamescope's patched copy is
+    where a display script's HDR gets added; the kernel's own EDID of such a
+    panel never says it, which the caller allows for.
     """
     if not valid(blob):
         return None

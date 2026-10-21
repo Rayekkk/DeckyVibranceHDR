@@ -178,7 +178,7 @@ class SerializedMutations(PluginTest):
         M.Plugin._mutation_lock = asyncio.Lock()
         M.Plugin._unloading = False
         M.Plugin._disconnected = False
-        M._read_float_atom = lambda atom: 0.8
+        M.vibrance_x11.read_float_atom = lambda atom: 0.8
         M.Plugin._state.update({
             "external_display": False, "sdr_enabled": False,
             "sdr_applied": False,
@@ -307,9 +307,9 @@ class StaleLookJobs(PluginTest):
             result.update(M.Plugin._state)
 
         M._write_look = late_build
-        M._write_string_atom = lambda atom, value: (
+        M.vibrance_x11.write_string_atom = lambda atom, value: (
             writes.append((atom, value)) or True)
-        M._read_string_atom = lambda atom: None
+        M.vibrance_x11.read_string_atom = lambda atom: None
         M.DEBOUNCE_S = 0
         M.Plugin._mutation_lock = asyncio.Lock()
         M.Plugin._tasks = []
@@ -368,8 +368,8 @@ class LookOwnership(PluginTest):
         M.Plugin._hdr_look_path = own
         M.Plugin._hdr_look_baseline = foreign
         M.Plugin._state["hdr_applied"] = True
-        M._read_string_atom = lambda atom: own
-        M._write_string_atom = lambda atom, value: (
+        M.vibrance_x11.read_string_atom = lambda atom: own
+        M.vibrance_x11.write_string_atom = lambda atom, value: (
             writes.append((atom, value)) or True)
         self.assertTrue(M.Plugin._release_look("hdr"))
         self.assertEqual(writes, [(M.ATOM_LOOK_PQ, foreign)])
@@ -380,8 +380,8 @@ class LookOwnership(PluginTest):
         M.Plugin._sdr_look_path = own
         M.Plugin._sdr_look_baseline = None
         M.Plugin._state["sdr_look_applied"] = True
-        M._read_string_atom = lambda atom: own
-        M._write_string_atom = lambda atom, value: False
+        M.vibrance_x11.read_string_atom = lambda atom: own
+        M.vibrance_x11.write_string_atom = lambda atom, value: False
         self.assertFalse(M.Plugin._release_look("sdr"))
         self.assertEqual(M.Plugin._sdr_look_path, own)
         self.assertTrue(M.Plugin._state["sdr_look_applied"])
@@ -393,7 +393,7 @@ class ReleaseIsReallyOff(PluginTest):
 
     def setUp(self):
         self.written = []
-        M._write_float_atom = lambda name, value: (
+        M.vibrance_x11.write_float_atom = lambda name, value: (
             self.written.append(value) or True)
         M.Plugin._release_look = staticmethod(lambda component: None)
         M.Plugin._state.update({"sdr_applied": True, "sdr_enabled": True})
@@ -428,11 +428,11 @@ class RequestHandling(PluginCase):
         self.mock(M.Plugin, "_release_sdr", side_effect=lambda: calls.append("sdr"))
         self.mock(M.Plugin, "_release_look", side_effect=calls.append)
         self.mock(M.Plugin, "_save", side_effect=lambda values=None: calls.append("save"))
-        M._xprop_timeout = 3.0                       # what _main leaves it at
+        M.vibrance_x11.timeout = 3.0                       # what _main leaves it at
         await self.plugin._unload()
         self.assertEqual(sorted(calls), ["hdr", "save", "sdr"])
-        with patch.object(M.subprocess, "run", side_effect=subprocess.TimeoutExpired("xprop", 0.25)) as run:
-            self.assertIsNone(M._read_int_atom(M.ATOM_IS_EXTERNAL))
+        with patch.object(M.vibrance_x11.subprocess, "run", side_effect=subprocess.TimeoutExpired("xprop", 0.25)) as run:
+            self.assertIsNone(M.vibrance_x11.read_int_atom(M.ATOM_IS_EXTERNAL))
             self.assertLessEqual(run.call_args.kwargs["timeout"], 0.25)
 
     async def test_unload_saves_while_x_restores_are_still_running(self):
@@ -464,7 +464,7 @@ class RequestHandling(PluginCase):
         foreign = "/home/deck/other-tool.cube"
         M.Plugin._hdr_look_baseline = self.strings[M.ATOM_LOOK_PQ] = foreign
         reads = iter([None, None])                  # both reads time out
-        M._read_string_atom.side_effect = lambda atom: next(reads, self.strings.get(atom))
+        M.vibrance_x11.read_string_atom.side_effect = lambda atom: next(reads, self.strings.get(atom))
         M.Plugin._state.update(hdr_enabled=True, hdr_saturation=1.2)
         self.plugin._schedule_look("hdr")
         await self.drain()
@@ -551,7 +551,7 @@ class RequestHandling(PluginCase):
 
     async def test_a_failed_read_when_enabling_keeps_the_known_baseline(self):
         reads = iter([None])
-        self.mock(M, "_read_float_atom", side_effect=lambda atom: next(reads, self.live_sdr))
+        self.mock(M.vibrance_x11, "read_float_atom", side_effect=lambda atom: next(reads, self.live_sdr))
         await self.plugin.set_sdr_enabled(True, 1.4)       # the baseline read times out
         await self.drain()
         await self.plugin.set_sdr_enabled(False)
@@ -784,7 +784,7 @@ class Controls(PluginCase):
         await self.drain()
         self.float_writer.reset_mock()
         self.string_writer.reset_mock()
-        self.mock(M, "_display_is_external", return_value=True)  # still believed internal
+        self.mock(M.vibrance_x11, "display_is_external", return_value=True)  # still believed internal
         M.Plugin._reassert()
         self.float_writer.assert_not_called()
         self.string_writer.assert_not_called()
@@ -814,8 +814,8 @@ class SlotReuse(PluginCase):
     async def check_slot_reuse_through_rpc(self, component, values, atom):
         with tempfile.TemporaryDirectory() as folder:
             self.mock(M, "_runtime_dir", return_value=folder)
-            self.mock(M, "LUT_SIZE", 5)
-            self.mock(M, "_look_file_cache", OrderedDict())
+            self.mock(M.vibrance_lutfile, "SIZE", 5)
+            self.mock(M.vibrance_lutfile, "_cache", OrderedDict())
             self.mock(M, "_write_look", side_effect=WRITE_LOOK)
             generate = self.mock(V, "generate", wraps=V.generate)
             await getattr(self.plugin, f"set_{component}_enabled")(True, values[0])
@@ -1031,3 +1031,12 @@ class SdrRecovery(PluginCase):
                                sdr_error="waiting for gamescope before restoring SDR")
         M.Plugin._release_sdr()
         self.assertEqual(M.Plugin._state["sdr_error"], "")
+
+
+class SdrRewrite(PluginCase):
+    async def test_the_same_slider_value_rewrites_an_atom_holding_an_older_target(self):
+        M.Plugin._state.update(sdr_enabled=True, sdr_saturation=1.5, sdr_applied=True, sdr_error="")
+        M.Plugin._last_sdr_written = self.live_sdr = 1.2     # e.g. written before the mapping moved
+        await self.plugin.set_sdr_saturation(1.5)
+        await self.drain()
+        self.assertEqual(self.live_sdr, 1.5)
