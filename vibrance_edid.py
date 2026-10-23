@@ -74,11 +74,11 @@ def _cta_collection_pq(block: bytes, start: int, end: int):
             break
         if pos + 1 + length > end:
             raise ValueError("truncated CTA data block")
-        if (block[pos] >> 5) == CTA_EXTENDED_TAG and block[pos + 1] == CTA_HDR_STATIC_METADATA:
-            if length < 3:
-                raise ValueError("truncated HDR static metadata")
-            if block[pos + 2] & EOTF_PQ_BIT:
-                return True
+        # Shorter than 3 it is skipped, as the kernel and libdisplay-info do.
+        if ((block[pos] >> 5) == CTA_EXTENDED_TAG and length >= 3
+                and block[pos + 1] == CTA_HDR_STATIC_METADATA
+                and block[pos + 2] & EOTF_PQ_BIT):
+            return True
         pos += 1 + length
     return False
 
@@ -134,6 +134,8 @@ def supports_pq(blob: bytes):
         found = False
         try:
             if block[0] == CTA_EXTENSION_TAG:
+                if block[1] < 3:  # data blocks arrived in revision 3; the kernel skips older
+                    continue
                 # CTA-861 says d=0 means no data blocks, but a panel that lists
                 # them anyway is believed: a false yes only shows an inert HDR
                 # control, a false no hides a working one and saves it off.
