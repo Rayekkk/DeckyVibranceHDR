@@ -1732,3 +1732,37 @@ class UnloadSurvivesAFailedRestore(PluginCase):
         with self.assertRaises(asyncio.CancelledError):
             await task
         self.assertEqual(M.state.tasks, [])
+
+
+class SettingsPathsStayOutOfTheLog(PluginCase):
+    """Users paste these logs into bug reports; the home directory names them."""
+
+    async def test_a_failed_save_gives_the_reason_without_the_path(self):
+        folder = "/home/someone"                # repr() would double a Windows separator
+        self.mock(M.Plugin, "_save", side_effect=PermissionError(
+            13, "Permission denied", f"{folder}/settings-x1y2"))
+        error = self.mock(M.decky.logger, "error")
+        message = M.Plugin._write_settings()
+        logged = " ".join(call.args[0] for call in error.call_args_list)
+        self.assertIn("Permission denied", logged)
+        self.assertNotIn(folder, logged)
+        self.assertNotIn(folder, message)
+
+    async def test_a_set_aside_file_is_named_without_its_directory(self):
+        self.mock(M.updater, "ssl_context", return_value=None)
+        self.mock(self.plugin, "_start_when_ready")
+        self.mock(M.vibrance_settings, "new", False)
+        warning = self.mock(M.decky.logger, "warning")
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            path.write_text("{broken")
+            store = SimpleNamespace(path=str(path), settings={})
+            store.getSetting = lambda key, default: store.settings.get(key, default)
+            self.mock(M, "settings", store)
+            await asyncio.wait_for(self.plugin._main(), 5)
+            (aside,) = Path(folder).glob("settings.json.corrupt-*")
+        notice = M.state.public["settings_notice"]
+        logged = " ".join(call.args[0] for call in warning.call_args_list)
+        for text in (notice, logged):
+            self.assertIn(aside.name, text)
+            self.assertNotIn(folder, text)

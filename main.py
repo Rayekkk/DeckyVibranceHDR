@@ -348,7 +348,7 @@ class Plugin:
             reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else exc
             message = f"could not save settings: {reason}"
             if message != state.public["settings_error"]:  # retried on every panel tick
-                decky.logger.error(f"{LOG} settings save failed: {exc}")
+                decky.logger.error(f"{LOG} settings save failed: {reason}")
             return message
 
     @staticmethod
@@ -898,7 +898,8 @@ class Plugin:
                 # Content that does not parse never will; waiting would leave
                 # the plugin dead. Keep it beside the file, start from defaults.
                 try:
-                    aside = await _offload(vibrance_settings.set_aside, settings)
+                    # The name only: the full path carries the user's home directory.
+                    aside = os.path.basename(await _offload(vibrance_settings.set_aside, settings))
                     decky.logger.warning(f"{LOG} settings were unreadable ({exc}); "
                                          f"kept as {aside}, starting from defaults")
                     state.public["settings_notice"] = (
