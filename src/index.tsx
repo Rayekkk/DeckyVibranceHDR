@@ -317,10 +317,9 @@ const Content: FC = () => {
             <Field
               label="Standing down"
               description={
-                "Everything here is calibrated against the built-in panel - " +
-                "its gamut decides the mapping and its EDID decides whether " +
-                "the HDR half exists. Nothing is applied to an external " +
-                "display. Unplug it and the settings come back."
+                "Settings here are tuned for the built-in screen, so nothing is " +
+                "applied to an external display. Unplug it and your saved " +
+                "settings apply again."
               }
             />
           </PanelSectionRow>
@@ -349,8 +348,8 @@ const Content: FC = () => {
                 label="Saturation"
                 description={
                   state.sdr_saturation > state.sdr_soft_limit
-                    ? `Past ${pct(state.sdr_soft_limit)} colours start clipping ` +
-                      "and detail in saturated areas goes with them."
+                    ? `Past ${pct(state.sdr_soft_limit)} the strongest colours start ` +
+                      "clipping and lose detail."
                     : "100% is neutral; higher values make colours more saturated."
                 }
                 value={state.sdr_saturation}
@@ -365,7 +364,7 @@ const Content: FC = () => {
               <Field
                 label="Now"
                 description={
-                  state.sdr_generating ? "building the LUT..." : undefined
+                  state.sdr_generating ? "Preparing the colours..." : undefined
                 }
                 focusable
               >
@@ -385,7 +384,7 @@ const Content: FC = () => {
         <PanelSectionRow>
           <ToggleField
             label="Enabled"
-            description="Applies only to games actually running in HDR. gamescope has no dial for this, so the plugin builds a colour LUT for it."
+            description="Applies only to games actually running in HDR."
             checked={state.hdr_enabled}
             onChange={(v) => {
               const saturation = sync.snapshot()?.hdr_saturation ?? state.hdr_saturation;
@@ -402,9 +401,9 @@ const Content: FC = () => {
                 label="Saturation"
                 description={
                   state.hdr_saturation > state.hdr_soft_limit
-                    ? `Above ${pct(state.hdr_soft_limit)} channels start clipping ` +
-                      "at the edge of the gamut."
-                    : "Raises colour saturation while keeping brightness, up to the edge of the colour gamut."
+                    ? `Past ${pct(state.hdr_soft_limit)} the strongest colours start ` +
+                      "clipping and lose detail."
+                    : "Raises colour saturation without changing brightness."
                 }
                 value={state.hdr_saturation}
                 min={state.hdr_min}
@@ -419,11 +418,11 @@ const Content: FC = () => {
                 label="Now"
                 description={
                   state.generating
-                    ? "building the LUT..."
+                    ? "Preparing the colours..."
                     : state.hdr_applied_saturation !== null
-                      ? `Last LUT sent: ${pct(state.hdr_applied_saturation)}`
+                      ? `Last applied: ${pct(state.hdr_applied_saturation)}`
                       : state.hdr_saturation === 1
-                        ? "100% needs no LUT"
+                        ? "100% is neutral, nothing to apply"
                         : "Waiting to apply the HDR setting"
                 }
                 focusable

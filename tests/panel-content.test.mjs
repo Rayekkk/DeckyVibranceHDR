@@ -47,13 +47,13 @@ test("sections, labels and the HDR and reset controls follow the backend", async
     assert.match(sliders[0].props.description, /^100% is neutral/);
     const nows = field(tree, "Now");
     assert.equal(nows[0].props.description, undefined);
-    assert.equal(nows[1].props.description, "building the LUT...");
+    assert.equal(nows[1].props.description, "Preparing the colours...");
     tree = await show({});
-    assert.equal(field(tree, "Now")[1].props.description, "100% needs no LUT");
+    assert.equal(field(tree, "Now")[1].props.description, "100% is neutral, nothing to apply");
     tree = await show({ sdr_saturation: 2.5, hdr_saturation: 1.4 });
     const [sdrSlider, hdrSlider] = tree.filter(n => n.type === "SliderField");
-    assert.match(sdrSlider.props.description, /^Past 200% colours/);
-    assert.match(hdrSlider.props.description, /^Above 130% channels/);
+    assert.match(sdrSlider.props.description, /^Past 200% the strongest colours start clipping and lose detail\.$/);
+    assert.match(hdrSlider.props.description, /^Past 130% the strongest colours start clipping and lose detail\.$/);
     assert.deepEqual([sdrSlider.props.max, hdrSlider.props.max], [3, 1.5]);
     tree = await show({ sdr_enabled: false, hdr_enabled: false });
     assert.equal(tree.filter(n => n.type === "SliderField").length, 0);

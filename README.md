@@ -111,10 +111,10 @@ and install the release ZIP manually. The updater offers published releases.
 1. Open **Decky Vibrance HDR** in the Quick Access Menu.
 2. Turn on **Enabled** under **SDR saturation** or **HDR saturation**.
 3. Start at **100%**, then increase **Saturation** until you like the result.
-4. Let the change finish and check **Now**, the HDR **Last LUT sent** status and any error.
+4. Let the change finish and check **Now**, the HDR **Last applied** status and any error.
 
 The slider shows your latest selection immediately. Applying it can take longer,
-especially when a colour table is being built. The menu shows **building the LUT...**
+especially when a colour table is being built. The menu shows **Preparing the colours...**
 while that work is running. Recent edits are grouped so an older selection does not
 keep delaying the one you want.
 
@@ -136,7 +136,7 @@ HDR affects only content already running in HDR. The range is **100–150%**, wi
 clipping warning above **130%**. It does not turn an SDR game into an HDR game.
 
 Above 100%, the plugin builds a colour lookup table (LUT) for gamescope. **Now** is
-your requested value; **Last LUT sent** is the last value successfully handed to
+your requested value; **Last applied** is the last value successfully handed to
 gamescope. They can differ while building or retrying. This status confirms the
 handoff, not a physical measurement of the game's image. Build time varies with
 the device and workload.
@@ -186,9 +186,9 @@ a notice clears by itself once the backend answers.
 | SDR steps above 100% are much stronger or weaker than expected | Your device may use a gamescope display script with its own colour data (see Requirements). Please report the device and its panel so the mapping can be checked. |
 | Conflict or colours keep changing | Avoid overlapping colour controls such as vibrantDeck. Another tool can overwrite SDR settings or an SDR/HDR colour table; keep one tool controlling the same effect. |
 | The HDR section is missing | Check whether the built-in panel advertises HDR/PQ. This is expected on the standard Legion Go S LCD. |
-| HDR changes do not affect a game | Confirm the game is actually running in HDR and check Last LUT sent. The plugin does not enable a game's HDR mode. |
+| HDR changes do not affect a game | Confirm the game is actually running in HDR and check Last applied. The plugin does not enable a game's HDR mode. |
 | External display → Standing down | Adjustments are paused for the external screen. Return to the built-in display to resume the saved choices. |
-| building the LUT... or an older Last LUT sent value | Wait for the latest build. If it stays pending, check the error and backend connection; build time is not fixed across devices. |
+| Preparing the colours... or an older Last applied value | Wait for the latest build. If it stays pending, check the error and backend connection; build time is not fixed across devices. |
 | An update check or download failed | Read the error and try again, or download the attached plugin ZIP from Releases and install it through Decky. |
 | Reloading takes several seconds | Decky 3.2.10 showed a loader shutdown issue during audits on both devices, and Decky 3.3.0 showed it again on the Odin 3 under FEX. The plugin cannot patch that loader issue. See the [Odin 3 / Armada audit](docs/AUDITS.md#device-validation-latest) for the reproduced limitation. |
 

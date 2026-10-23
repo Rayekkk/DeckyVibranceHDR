@@ -40,12 +40,11 @@ test("each section and row appears only when its state asks for it", async t => 
 
     tree = await show({ external_display: true });
     assert.deepEqual(titles(tree), ["External display", "Reset"]);
-    assert.equal(field(tree, "Standing down").props.description, "Everything here is calibrated against "
-      + "the built-in panel - its gamut decides the mapping and its EDID decides whether the HDR half "
-      + "exists. Nothing is applied to an external display. Unplug it and the settings come back.");
+    assert.equal(field(tree, "Standing down").props.description, "Settings here are tuned for the "
+      + "built-in screen, so nothing is applied to an external display. Unplug it and your saved settings apply again.");
 
     tree = await show({ hdr_saturation: 1.3 });           // at the limit is not past it
-    assert.match(tree.filter(n => n.type === "SliderField")[1].props.description, /^Raises colour/);
+    assert.match(tree.filter(n => n.type === "SliderField")[1].props.description, /^Raises colour saturation without changing brightness\.$/);
 
     // Not ready: the settings failure takes the top row only when it is the reason.
     const failure = "could not load settings: denied";
