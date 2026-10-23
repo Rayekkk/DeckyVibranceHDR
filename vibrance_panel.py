@@ -24,8 +24,8 @@ from vibrance_x11 import ATOM_EDID_PATH, ATOM_IS_EXTERNAL
 # Measured: Legion Go 2 OLED is 0.6836/0.3154 and passes; Legion Go S LCD is
 # 0.6523/0.3408 and fails on y after passing x by a hair.
 #
-# gamescope runs the test on the EDID's primaries - or on Rec.709 when the
-# EDID has no colorimetry (red x of zero) - unless one of its bundled
+# gamescope runs the test on the EDID's primaries - or on Rec.709 when there
+# is no EDID or it has no colorimetry (red x of zero) - unless one of its bundled
 # display scripts supplies colorimetry of its own - a handful of devices
 # (Steam Deck LCD, Zotac Zone, OXP F1 and GPD Win 4 at the time of writing).
 # The plugin reads the EDID, which is what gamescope uses everywhere else.
@@ -156,7 +156,13 @@ def configure_for_panel(probe=None) -> bool:
     # turn a standard panel's neutral slider into its harshest atom value.
     # Before anything is known that is the startup default: the wide
     # mapping, D65 and a visible HDR half.
+    kernel_edid = str(cache_key[-2]).startswith(os.path.join(vibrance_host.DRM_SYSFS, ""))
     wide = panel_is_wide_gamut(blob)
+    if blob == b"" and kernel_edid:
+        # The connector has no EDID at all, and gamescope then assumes Rec.709
+        # just as for a red x of zero. Only the kernel's file is trusted to be
+        # empty: one at gamescope's own path may not be written yet.
+        wide = False
     if vibrance_edid.valid(blob):
         state.sdr_white_point = vibrance_edid.white_point(blob)
 
@@ -164,7 +170,7 @@ def configure_for_panel(probe=None) -> bool:
         use_mapping(wide)
 
     hdr = panel_supports_hdr(blob)
-    if hdr is False and str(cache_key[-2]).startswith(os.path.join(vibrance_host.DRM_SYSFS, "")):
+    if hdr is False and kernel_edid:
         # gamescope adds HDR for a display script's panel (Steam Deck OLED,
         # say) only to its patched EDID copy; the kernel's never says so.
         hdr = None

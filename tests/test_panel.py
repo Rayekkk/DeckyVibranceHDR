@@ -437,12 +437,51 @@ class CapabilityGating(PluginTest):
         self.assertEqual(M.state.public["sdr_max"], M.SDR_MAX_WIDE)
         self.assertEqual(M.state.public["sdr_soft_limit"], M.vibrance_state.SDR_SOFT_WIDE)
 
+    def _from_startup_defaults(self, edid, gamescope_path=False):
+        """The wide startup mapping, then one probe of a DSI panel whose EDID
+        file holds *edid* (None: no file) - the kernel's, or gamescope's."""
+        M.state.sdr_neutral_atom, M.state.sdr_atom_span = 1.0, 2.0
+        M.state.public["hdr_supported"] = True
+        with tempfile.TemporaryDirectory() as drm, tempfile.TemporaryDirectory() as home, \
+                patch.object(M.vibrance_host, "DRM_SYSFS", drm), \
+                patch.object(M.state, "panel_cache_key", None), \
+                patch.object(M.state, "panel_cache_complete", False):
+            kernel_panel(drm, "card0-DSI-1", b"")
+            path = (os.path.join(home, "edid.bin") if gamescope_path
+                    else os.path.join(drm, "card0-DSI-1", "edid"))
+            if edid is None:
+                os.remove(os.path.join(drm, "card0-DSI-1", "edid"))
+            else:
+                Path(path).write_bytes(edid)
+            M.vibrance_panel.configure_for_panel(
+                M.vibrance_panel.probe_panel((False, path if gamescope_path else None)))
+            complete = M.state.panel_cache_complete
+        return (M.state.sdr_neutral_atom, M.state.sdr_atom_span), complete
+
     def test_an_edid_we_cannot_read_withdraws_nothing(self):
-        """Ignorance is not a no - a missing atom must not cost a user a
+        """Ignorance is not a no - a missing EDID must not cost a user a
         control that works."""
-        self._boot(wide=None, pq=None)
-        self.assertEqual(M.state.sdr_neutral_atom, 1.0)
+        mapping, _complete = self._from_startup_defaults(None)
+        self.assertEqual(mapping, (1.0, 2.0))
         self.assertTrue(M.state.public["hdr_supported"])
+
+    def test_an_empty_kernel_edid_is_rec709_like_gamescope(self):
+        """A DSI panel with an empty EDID file: gamescope takes Rec.709, so
+        the wide default would make 101% its harshest atom value."""
+        mapping, complete = self._from_startup_defaults(b"")
+        self.assertEqual(mapping, (0.0, 1.0))
+        self.assertTrue(M.state.public["hdr_supported"])
+        self.assertFalse(complete, "an EDID that turns up later must still be read")
+
+    def test_an_empty_edid_maps_like_one_without_colorimetry(self):
+        no_colorimetry = _harness.valid_edid(bytearray(128))
+        self.assertEqual(self._from_startup_defaults(b"")[0],
+                         self._from_startup_defaults(no_colorimetry)[0])
+
+    def test_an_empty_edid_at_gamescopes_path_is_not_known_yet(self):
+        """gamescope may not have finished writing its patched copy."""
+        mapping, _complete = self._from_startup_defaults(b"", gamescope_path=True)
+        self.assertEqual(mapping, (1.0, 2.0))
 
     def test_an_unreadable_edid_after_a_known_one_keeps_its_mapping(self):
         """A standard panel read as unknown (an EDID not yet published after a
