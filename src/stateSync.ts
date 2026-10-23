@@ -109,11 +109,11 @@ export function createStateSync<T extends object>(
           observed = await job.write();
           reportConnection(readTimedOut ? READ_TIMED_OUT : "");
         } catch (error) {
-          if (active) onError(error);
+          // The toaster is global, so a failure after the menu closed still shows.
+          if (!disposed) onError(error);
         } finally {
           clearTimeout(timer);
-          // A failure while closed reports nothing, so the notice must not
-          // outlive the write it was about.
+          // The notice must not outlive the write it was about.
           if (connectionMessage === WRITE_PENDING) reportConnection(readTimedOut ? READ_TIMED_OUT : "");
           finish(job);
           publish();

@@ -494,15 +494,29 @@ test("a read that answered in time never reports a timeout later", async t => {
   } finally { sync.dispose(); }
 });
 
-test("a write that fails while the panel is closed raises no toast", async () => {
+test("a write that fails while the panel is closed still raises one toast", async () => {
   const errors = [];
   const sync = createSync(async () => ({ value: 1 }), () => {}, error => errors.push(error));
   sync.activate();
   await sync.refresh();
   sync.deactivate();
   await sync.mutate("value", 2, async () => { throw new Error("offline"); });
-  assert.deepEqual(errors, []);
+  assert.equal(errors.length, 1);
+  sync.activate();                        // reopening does not toast it again
+  await sync.refresh();
+  assert.equal(errors.length, 1);
   sync.dispose();
+});
+
+test("a write that fails after the plugin was disposed raises no toast", async () => {
+  const errors = [];
+  const sync = createSync(async () => ({ value: 1 }), () => {}, error => errors.push(error));
+  sync.activate();
+  await sync.refresh();
+  const done = sync.mutate("value", 2, async () => { throw new Error("offline"); });
+  sync.dispose();
+  await done;
+  assert.deepEqual(errors, []);
 });
 
 test("a stale read failure is not shown after reopening", async () => {
@@ -649,7 +663,7 @@ test("replacing an unsent slider edit keeps the other slider's edit queued", asy
   assert.deepEqual(calls, ["first", "hdr", "sdr 1.5"]);
 });
 
-test("closing the last panel stops renders and failure toasts", async () => {
+test("closing the last panel stops renders but a failed write still toasts", async () => {
   const renders = [], errors = [];
   const sync = createSync(async () => ({ value: 1 }), () => {}, error => errors.push(error));
   const off = sync.subscribe(state => renders.push(state), () => {});
@@ -657,7 +671,7 @@ test("closing the last panel stops renders and failure toasts", async () => {
   off();
   const seen = renders.length;
   await sync.mutate("value", 2, async () => { throw new Error("offline"); });
-  assert.deepEqual(errors, []);
+  assert.equal(errors.length, 1);
   assert.equal(renders.length, seen);
   sync.dispose();
 });
