@@ -4,6 +4,14 @@
 // the loader connection, just enough to render the built panel as plain objects.
 import { readFileSync } from "node:fs";
 
+/** A complete get_state reply (every key of PluginState.public); tests override what they need. */
+export const baseState = { ready: true, reason: "ready", sdr_enabled: true, hdr_enabled: true,
+  sdr_saturation: 1, hdr_saturation: 1, sdr_applied: true, sdr_look_applied: false, hdr_applied: false,
+  hdr_applied_saturation: null, sdr_look_saturation: null, sdr_error: "", sdr_look_error: "",
+  hdr_error: "", settings_error: "", settings_notice: "", settings_loaded: true, generating: false,
+  sdr_generating: false, conflict: "", external_display: false, hdr_supported: true,
+  sdr_min: 1, sdr_max: 3, sdr_soft_limit: 2, hdr_min: 1, hdr_max: 1.5, hdr_soft_limit: 1.3 };
+
 /** Every element in a rendered tree, depth first. */
 export const nodes = tree => !tree ? [] : Array.isArray(tree) ? tree.flatMap(nodes)
   : typeof tree !== "object" ? [] : [tree, ...nodes(tree.props?.children)];

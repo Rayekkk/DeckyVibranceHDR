@@ -2,17 +2,11 @@
 // Copyright (c) 2026 Rayekkk
 import assert from "node:assert/strict";
 import test from "node:test";
-import { loadPlugin, nodes, settle } from "./panel-harness.mjs";
+import { baseState, loadPlugin, nodes, settle } from "./panel-harness.mjs";
 
 test("each section and row appears only when its state asks for it", async t => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  const base = { ready: true, reason: "ready", sdr_enabled: true, hdr_enabled: true, sdr_saturation: 1,
-    hdr_saturation: 1, sdr_applied: true, hdr_applied: false, hdr_applied_saturation: null,
-    sdr_error: "", sdr_look_error: "", hdr_error: "", settings_error: "", settings_notice: "",
-    settings_loaded: true, generating: false, conflict: "", external_display: false,
-    sdr_generating: false, hdr_supported: true,
-    sdr_min: 1, sdr_max: 3, sdr_soft_limit: 2, hdr_min: 1, hdr_max: 1.5, hdr_soft_limit: 1.3 };
-  let backend = { ...base }, gate = null;
+  let backend = { ...baseState }, gate = null;
   const { render, close, states } = await loadPlugin(route => async () => {
     if (route === "get_version") return { version: "1.0.0" };
     if (route === "get_state") return { ...backend };
@@ -20,7 +14,7 @@ test("each section and row appears only when its state asks for it", async t => 
     return { ...backend };
   });
   const show = async state => {
-    backend = { ...base, ...state }; t.mock.timers.tick(1000); await settle(); return nodes(render());
+    backend = { ...baseState, ...state }; t.mock.timers.tick(1000); await settle(); return nodes(render());
   };
   const titles = tree => tree.filter(n => n.type === "PanelSection").map(n => n.props.title);
   const labels = tree => tree.filter(n => n.type === "Field").map(n => n.props.label);
