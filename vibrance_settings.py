@@ -11,10 +11,13 @@ borrows the manager's path and in-memory dict. Nothing here imports `decky`.
 
 import json
 import os
+import re
 import stat
 import tempfile
 import threading
 import time
+
+import vibrance_host
 
 # The manager is reached through the default thread pool. Slider work and
 # toggle RPCs can overlap there, so the file may not rely on event-loop
@@ -23,6 +26,9 @@ lock = threading.RLock()
 # True while no settings file existed before Decky's manager created its empty
 # one; only then may a missing file read as defaults.
 new = False
+# What tempfile names a write's temporary file; one a killed write left behind
+# is removed. settings.json and its .corrupt-* copies never match.
+ORPHAN = re.compile(r"settings-[a-z0-9_]{8}")
 
 
 class SettingsUnreadable(ValueError):
@@ -112,21 +118,33 @@ def write(manager, values) -> None:
             manager.settings.update(snapshot)
             manager.commit()
             return
+        folder = os.path.dirname(path)
+        vibrance_host.remove_stale(folder, ORPHAN.fullmatch)
+        try:
+            mode = os.stat(path).st_mode & 0o777
+        except OSError:
+            mode = None
         tmp = None
         try:
-            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
-                                             dir=os.path.dirname(path),
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=folder,
                                              prefix="settings-", delete=False) as f:
                 tmp = f.name
+                if mode is not None and hasattr(os, "fchmod"):
+                    os.fchmod(f.fileno(), mode)
                 json.dump(snapshot, f, indent=4, ensure_ascii=False, allow_nan=False)
                 f.flush()
                 os.fsync(f.fileno())
-            if os.path.exists(path):
-                info = os.stat(path)
-                os.chmod(tmp, info.st_mode & 0o777)
-                if hasattr(os, "geteuid") and os.geteuid() == 0:
-                    os.chown(tmp, info.st_uid, info.st_gid)
             os.replace(tmp, path)
+            # The rename itself must survive a power cut. Windows cannot open a
+            # folder; anywhere it fails the new file is already in place.
+            try:
+                descriptor = os.open(folder or ".", os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+                try:
+                    os.fsync(descriptor)
+                finally:
+                    os.close(descriptor)
+            except OSError:
+                pass
             manager.settings = snapshot
         finally:
             if tmp and os.path.exists(tmp):

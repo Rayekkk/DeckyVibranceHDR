@@ -12,6 +12,7 @@ import functools
 import os
 import stat
 import sys
+import time
 
 # The host's own interpreter, reached past the emulator's view of the root.
 NATIVE_PYTHON = "/proc/self/root/usr/bin/python3"
@@ -70,6 +71,27 @@ def file_identity(path):
         return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
     except OSError:
         return None
+
+
+def remove_stale(folder, belongs) -> None:
+    """Delete the entries of *folder* that *belongs* names and a killed
+    process left behind.
+
+    Only those older than a minute: another instance may still be writing
+    one during a reload, and the native LUT worker's deadline is 30 s.
+    """
+    try:
+        entries = os.listdir(folder or ".")
+    except OSError:
+        return
+    for entry in entries:
+        if belongs(entry):
+            stale = os.path.join(folder, entry)
+            try:
+                if time.time() - os.lstat(stale).st_mtime > 60:
+                    os.unlink(stale)
+            except OSError:
+                pass
 
 
 def read_edid(path):

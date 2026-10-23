@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,18 +27,50 @@ class AtomicSettings(PluginTest):
         loaded.start()
         self.addCleanup(loaded.stop)
 
-    def test_nonroot_save_does_not_require_chown_privileges(self):
+    @unittest.skipUnless(hasattr(os, "fchmod"), "permission bits need POSIX")
+    def test_a_save_keeps_the_file_mode(self):
         with tempfile.TemporaryDirectory() as folder:
             path = os.path.join(folder, "settings.json")
-            with open(path, "w") as f:
-                f.write("{}")
-            manager = SimpleNamespace(path=path, settings={})
-            with patch.object(M, "settings", manager), patch.object(M.os, "geteuid", return_value=1000, create=True), \
-                    patch.object(M.os, "chown", side_effect=PermissionError("not root"), create=True) as chown:
-                M.Plugin._save()
-                chown.assert_not_called()
-                with open(path) as f:
-                    self.assertIn("hdr_saturation", json.load(f))
+            Path(path).write_text("{}")
+            os.chmod(path, 0o640)
+            M.vibrance_settings.write(SimpleNamespace(path=path, settings={}), {"sdr_enabled": True})
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o640)
+
+    def test_the_folder_is_synced_after_the_rename(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "settings.json")
+            events = []
+            real_open, real_replace = os.open, os.replace
+
+            def opened(name, flags, *args):
+                events.append(("open", os.path.normcase(os.fspath(name))))
+                return real_open(name, flags, *args)
+
+            def replaced(*args):
+                events.append(("replace",))
+                return real_replace(*args)
+
+            with patch.object(M.vibrance_settings.os, "open", opened), \
+                    patch.object(M.vibrance_settings.os, "replace", replaced):
+                M.vibrance_settings.write(SimpleNamespace(path=path, settings={}), {"sdr_enabled": True})
+            self.assertIn(("open", os.path.normcase(folder)), events[events.index(("replace",)):])
+            self.assertEqual(json.loads(Path(path).read_text()), {"sdr_enabled": True})
+
+    def test_a_killed_write_s_temporary_file_is_removed_but_nothing_else(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "settings.json")
+            orphan = "settings-ab_cd123"
+            kept = ["settings.json", "settings.json.corrupt-20260101-000000",
+                    "settings-notes.txt", "settings-abcdefghi", "hdr-look-0.cube"]
+            old = time.time() - 24 * 3600
+            for name in [orphan, *kept]:
+                Path(folder, name).write_text("{}")
+                os.utime(os.path.join(folder, name), (old, old))
+            Path(folder, "settings-fresh123").write_text("{}")   # another instance mid-write
+            M.vibrance_settings.write(SimpleNamespace(path=path, settings={}), {"sdr_enabled": True})
+            self.assertEqual(sorted(os.listdir(folder)), sorted(kept + ["settings-fresh123"]))
+            self.assertEqual(json.loads(Path(path).read_text()), {"sdr_enabled": True})
+
     def test_nonfinite_xproperty_cannot_become_a_saved_baseline(self):
         for value in (float("nan"), float("inf"), float("-inf")):
             self.assertIsNone(M.vibrance_x11.cardinal_to_float(M.vibrance_x11.float_to_cardinal(value)))
