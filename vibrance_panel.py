@@ -16,7 +16,7 @@ import vibrance_effects
 import vibrance_host
 import vibrance_state
 import vibrance_x11
-from vibrance_state import LOG, SDR_MAX_WIDE, SDR_MIN, SDR_SOFT_WIDE, state
+from vibrance_state import LOG, SDR_MIN, SDR_SOFT_WIDE, state
 from vibrance_x11 import ATOM_EDID_PATH, ATOM_IS_EXTERNAL
 
 # gamescope's own BIsWideGamut test, which is what decides between the two
@@ -110,7 +110,7 @@ def probe_panel(metadata=None):
 
 def panel_shape():
     """Everything the panel decides, to tell whether a probe moved any of it."""
-    return (state.sdr_neutral_atom, state.sdr_atom_span, state.public["sdr_max"],
+    return (state.sdr_neutral_atom, state.sdr_atom_span,
             state.public["hdr_supported"], state.public["external_display"],
             state.sdr_white_point)
 
@@ -118,12 +118,11 @@ def use_mapping(wide) -> None:
     """Map the slider onto the branch of buildSDRColorimetry the panel takes."""
     if wide:
         state.sdr_neutral_atom, state.sdr_atom_span = 1.0, 2.0
-        state.public["sdr_max"] = SDR_MAX_WIDE
         state.public["sdr_soft_limit"] = SDR_SOFT_WIDE
     else:
         state.sdr_neutral_atom, state.sdr_atom_span = 0.0, 1.0
-        # The atom gives out at 200%; the look carries the rest.
-        state.public["sdr_max"] = vibrance_effects.SDR_MAX_STANDARD
+        # The atom gives out at 200%; the look carries the rest to the same
+        # sdr_max, which is why PluginState.reset sets that once for both.
         state.public["sdr_soft_limit"] = vibrance_effects.SDR_SOFT_STANDARD
 
 def configure_for_panel(probe=None) -> bool:

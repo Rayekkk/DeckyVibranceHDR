@@ -28,6 +28,7 @@ import os
 import shutil
 import sys
 import time
+from contextlib import asynccontextmanager
 
 import decky
 from settings import SettingsManager
@@ -148,6 +149,18 @@ def _offload(fn, *args):
     return asyncio.get_event_loop().run_in_executor(None, fn, *args)
 
 
+@asynccontextmanager
+async def _mutation():
+    """The mutation lock for an exported setter; False once unloading has begun."""
+    async with state.mutation_lock:
+        if state.unloading:
+            yield False
+            return
+        if not state.settings_loaded:
+            raise RuntimeError("settings have not loaded; retry after startup")
+        yield True
+
+
 def _boottime() -> float:
     """Seconds since boot, counting time spent suspended.
 
@@ -207,11 +220,9 @@ class Plugin:
             raise ValueError("enabled must be a boolean")
         if saturation is not None:
             saturation = vibrance_state.clamp(saturation, SDR_MIN, state.public["sdr_max"])
-        async with state.mutation_lock:
-            if state.unloading:
+        async with _mutation() as allowed:
+            if not allowed:
                 return dict(state.public)
-            if not state.settings_loaded:
-                raise RuntimeError("settings have not loaded; retry after startup")
             if saturation is not None:
                 state.public["sdr_saturation"] = saturation
             if enabled and state.public["external_display"]:
@@ -242,11 +253,9 @@ class Plugin:
             raise ValueError("enabled must be a boolean")
         if saturation is not None:
             saturation = vibrance_state.clamp(saturation, HDR_MIN, HDR_MAX)
-        async with state.mutation_lock:
-            if state.unloading:
+        async with _mutation() as allowed:
+            if not allowed:
                 return dict(state.public)
-            if not state.settings_loaded:
-                raise RuntimeError("settings have not loaded; retry after startup")
             if saturation is not None:
                 state.public["hdr_saturation"] = saturation
             if enabled and (state.public["external_display"]
@@ -265,11 +274,9 @@ class Plugin:
             return dict(state.public)
 
     async def set_sdr_saturation(self, value: float) -> dict:
-        async with state.mutation_lock:
-            if state.unloading:
+        async with _mutation() as allowed:
+            if not allowed:
                 return dict(state.public)
-            if not state.settings_loaded:
-                raise RuntimeError("settings have not loaded; retry after startup")
             value = vibrance_state.clamp(value, SDR_MIN, state.public["sdr_max"])
             changed = value != state.public["sdr_saturation"]
             state.public["sdr_saturation"] = value
@@ -289,11 +296,9 @@ class Plugin:
             return dict(state.public)
 
     async def set_hdr_saturation(self, value: float) -> dict:
-        async with state.mutation_lock:
-            if state.unloading:
+        async with _mutation() as allowed:
+            if not allowed:
                 return dict(state.public)
-            if not state.settings_loaded:
-                raise RuntimeError("settings have not loaded; retry after startup")
             value = vibrance_state.clamp(value, HDR_MIN, HDR_MAX)
             changed = value != state.public["hdr_saturation"]
             state.public["hdr_saturation"] = value
@@ -306,11 +311,9 @@ class Plugin:
             return dict(state.public)
 
     async def reset(self) -> dict:
-        async with state.mutation_lock:
-            if state.unloading:
+        async with _mutation() as allowed:
+            if not allowed:
                 return dict(state.public)
-            if not state.settings_loaded:
-                raise RuntimeError("settings have not loaded; retry after startup")
             state.public["sdr_saturation"] = SAT_DEFAULT
             state.public["hdr_saturation"] = SAT_DEFAULT
             state.public["sdr_enabled"] = False
