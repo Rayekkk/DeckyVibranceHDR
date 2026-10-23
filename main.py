@@ -907,11 +907,11 @@ class Plugin:
                         f"The old file is kept as {aside}.")
                     continue
                 except OSError as move:
-                    failure = f"{exc}; could not set the file aside: {move}"
+                    failure = f"{exc}; could not set the file aside: {vibrance_host.loggable(move)}"
             except Exception as exc:
                 # Defaults are not a safe replacement for a file we could not
                 # read. Keep the file intact and recover from transient I/O.
-                failure = exc
+                failure = vibrance_host.loggable(exc)
             message = f"could not load settings: {failure}"
             state.public["reason"] = message
             state.public["settings_error"] = message

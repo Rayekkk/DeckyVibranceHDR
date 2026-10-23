@@ -338,6 +338,32 @@ class ReadFailure(PluginCase):
         self.assertIn("denied", logged[0])
         self.assertIn("I/O error", logged[1])
 
+    async def test_a_load_failure_names_the_file_but_not_the_home_folder(self):
+        self.mock(M.updater, "ssl_context", return_value=None)
+        self.mock(self.plugin, "_start_when_ready")
+        self.mock(M, "SETTINGS_RETRY_S", 0)
+        home = "/home/deck/homebrew/settings/DeckyVibranceHDR"
+        unreadable = PermissionError(13, "Permission denied", f"{home}/settings.json")
+        unmovable = PermissionError(13, "Permission denied", f"{home}/settings.json",
+                                    None, f"{home}/settings.json.corrupt-1")
+        for read_error, aside_error in ((unreadable, None),
+                                        (M.vibrance_settings.SettingsUnreadable("invalid JSON"), unmovable)):
+            with self.subTest(read_error=read_error):
+                seen = []
+                def read(_manager, first=[read_error]):
+                    if first:
+                        raise first.pop()
+                    seen.extend((M.state.public["settings_error"], M.state.public["reason"]))
+                self.mock(M.vibrance_settings, "read", side_effect=read)
+                self.mock(M.vibrance_settings, "set_aside", side_effect=aside_error)
+                warning = self.mock(M.decky.logger, "warning")
+                await self.plugin._main()
+                logged = [call.args[0] for call in warning.call_args_list if "could not load settings" in call.args[0]]
+                self.assertEqual(len(logged), 1)
+                for text in logged + seen:
+                    self.assertIn("Permission denied: settings.json", text)
+                    self.assertNotIn("/home/deck", text)
+
     async def test_a_lasting_save_failure_is_logged_once_not_every_retry(self):
         self.mock(M.Plugin, "_save", side_effect=OSError("read-only file system"))
         error = self.mock(M.decky.logger, "error")
