@@ -437,6 +437,49 @@ class HttpBounds(PluginTest):
             info = updater.check()
         self.assertNotIn("error", info)
 
+    @staticmethod
+    def response(body, declared):
+        class Socket:
+            def makefile(self, mode):
+                return io.BufferedReader(io.BytesIO(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % declared + body))
+        response = http.client.HTTPResponse(Socket())
+        response.begin()
+        return response
+
+    def test_a_body_shorter_than_its_content_length_is_an_error(self):
+        updater = self.updater()
+        with patch.object(updater, "open_url", return_value=self.response(b"x" * 10, 1000)):
+            with self.assertRaisesRegex(ValueError, "ended early"):
+                updater.download_to("https://github.com/file", io.BytesIO(), 60)
+        out = io.BytesIO()
+        with patch.object(updater, "open_url", return_value=self.response(b"x" * 1000, 1000)):
+            self.assertEqual(updater.download_to("https://github.com/file", out, 60), 1000)
+        self.assertEqual(out.getvalue(), b"x" * 1000)
+
+    def test_cancel_downloads_stops_a_transfer_and_removes_its_partial_file(self):
+        updater = self.updater()
+        payload = io.BytesIO()
+        with zipfile.ZipFile(payload, "w") as archive:
+            archive.writestr("plugin/main.py", "# plugin")
+        payload = payload.getvalue()
+
+        class Cancelling(io.BytesIO):
+            def read1(self, n=-1):
+                U.cancel_downloads()          # Decky stops the plugin mid-transfer
+                return super().read1(min(n, 4))
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(U, "real_user", return_value=SimpleNamespace(pw_dir=folder, pw_uid=1, pw_gid=1)), \
+                patch.object(U, "xdg_download_dir", return_value=folder):
+            with patch.object(updater, "open_url", return_value=Cancelling(payload)):
+                result = updater.download("https://github.com/release.zip", "release.zip")
+            self.assertEqual(result, {"success": False, "error": "download cancelled"})
+            self.assertEqual(os.listdir(folder), [])
+            with patch.object(updater, "open_url", return_value=io.BytesIO(payload)):
+                self.assertTrue(updater.download("https://github.com/release.zip", "release.zip")["success"])
+            self.assertEqual(Path(folder, "release.zip").read_bytes(), payload)
+
     def test_metadata_size_limit_is_checked_even_for_a_complete_json_body(self):
         updater = self.updater()
         with patch.object(updater, "open_url", return_value=io.BytesIO(b"{}" * 20)), \

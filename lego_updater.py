@@ -72,6 +72,19 @@ CA_BUNDLES = (
     "/etc/ssl/ca-bundle.pem",               # openSUSE
 )
 
+# Bumped by cancel_downloads(); a transfer started under an older value stops.
+_cancel_generation = 0
+
+
+def cancel_downloads() -> None:
+    """Make every transfer in progress fail; later ones run normally.
+
+    For the plugin's unload: a download can run for a minute, and its partial
+    file is removed when it fails.
+    """
+    global _cancel_generation
+    _cancel_generation += 1
+
 
 # ── Pure helpers ───────────────────────────────────────────────────────────────
 
@@ -269,6 +282,7 @@ class Updater:
         is worse than no archive at all.
         """
         limit = MAX_DOWNLOAD_BYTES if limit is None else limit
+        generation = _cancel_generation
         written = 0
         deadline = time.monotonic() + timeout
         with self.open_url(url, timeout=min(timeout, HTTP_IDLE_TIMEOUT_S), headers=headers) as resp:
@@ -282,12 +296,18 @@ class Updater:
                 chunk = read(min(64 * 1024, limit - written + 1))
                 if time.monotonic() > deadline:
                     raise TimeoutError("download exceeded its time limit")
+                if generation != _cancel_generation:
+                    raise RuntimeError("download cancelled")
                 if not chunk:
                     break
                 written += len(chunk)
                 if written > limit:
                     raise ValueError("download exceeded the size limit")
                 out.write(chunk)
+            # read1 returns b"" at a premature EOF instead of IncompleteRead;
+            # length is what Content-Length still promised.
+            if getattr(resp, "length", None):
+                raise ValueError("download ended early")
         return written
 
     def download_to(self, url: str, out, timeout: int) -> int:
