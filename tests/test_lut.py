@@ -6,7 +6,9 @@
 
 import hashlib
 import io
+import math
 import os
+import random
 import subprocess
 import sys
 import tempfile
@@ -317,6 +319,56 @@ class Lut(PluginTest):
             self.assertFalse(worker.is_alive())
             self.assertEqual(result, [""])
             generate.assert_not_called()
+
+
+class Interpolation(PluginTest):
+    """What gamescope makes of a 33-cube between its nodes, against exact maths.
+
+    Error in ΔE_ITP (ITU-R BT.2124) over the same 15 000 seeded samples the
+    colour audit of 2026-10-23 used, PQ up to ~1000 nit. The bounds sit just
+    above what 33 nodes give today (PQ 1.5: max 13.65, p95 2.12; G22 1.5: max
+    5.97, p95 0.86): they stop the error from growing, they do not ask for less.
+    The worst cases sit where channels clip at the gamut edge.
+    """
+
+    @staticmethod
+    def tetrahedral(nodes, size, rgb):
+        """gamescope's lookup: the tetrahedron the point's fractions order picks."""
+        pos = [c * (size - 1) for c in rgb]
+        corner = [min(int(p), size - 2) for p in pos]
+        frac = [p - c for p, c in zip(pos, corner)]
+        order = sorted(range(3), key=lambda axis: -frac[axis])
+        at = lambda c: nodes[c[0] + size * (c[1] + size * c[2])]   # red fastest
+        out = [(1 - frac[order[0]]) * v for v in at(corner)]
+        weights = (frac[order[0]] - frac[order[1]], frac[order[1]] - frac[order[2]], frac[order[2]])
+        for axis, weight in zip(order, weights):
+            corner[axis] += 1
+            out = [o + weight * v for o, v in zip(out, at(corner))]
+        return out
+
+    def errors(self, saturation, encoding, cap):
+        nodes = [tuple(map(float, line.split()))
+                 for line in V.generate(saturation, 33, encoding).splitlines()[6:]]
+        rng = random.Random(5)
+        found = []
+        for _ in range(15000):
+            rgb = [rng.random() * cap for _ in range(3)]
+            exact = V._to_ictcp(V.saturate(rgb, saturation, encoding), encoding, V.D65)
+            looked_up = V._to_ictcp(self.tetrahedral(nodes, 33, rgb), encoding, V.D65)
+            i, t, p = (a - b for a, b in zip(exact, looked_up))
+            found.append(720 * math.sqrt(i * i + (0.5 * t) ** 2 + p * p))
+        found.sort()
+        return found[-1], found[int(0.95 * len(found))]
+
+    def test_pq_error_at_the_strongest_setting_does_not_grow(self):
+        worst, p95 = self.errors(1.5, "pq", 0.7518)        # 0.7518 PQ is ~1000 nit
+        self.assertLess(worst, 14.0)
+        self.assertLess(p95, 2.25)
+
+    def test_g22_error_at_the_strongest_setting_does_not_grow(self):
+        worst, p95 = self.errors(1.5, "g22", 1.0)
+        self.assertLess(worst, 6.2)
+        self.assertLess(p95, 0.9)
 
 
 class LutOutput(PluginTest):
