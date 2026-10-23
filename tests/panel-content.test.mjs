@@ -50,6 +50,13 @@ test("sections, labels and the HDR and reset controls follow the backend", async
     assert.equal(nows[1].props.description, "Preparing the colours...");
     tree = await show({});
     assert.equal(field(tree, "Now")[1].props.description, "100% is neutral, nothing to apply");
+    // The SDR look exists only on a standard-gamut panel past 200%; a wide one never reports it.
+    tree = await show({ sdr_saturation: 2.8, sdr_look_saturation: 1.4 });
+    assert.equal(field(tree, "Now")[0].props.description, "Last applied: 140%");
+    tree = await show({ sdr_saturation: 2.8, sdr_look_saturation: 1.4, sdr_generating: true });
+    assert.equal(field(tree, "Now")[0].props.description, "Preparing the colours...");
+    tree = await show({ sdr_saturation: 2.8 });
+    assert.equal(field(tree, "Now")[0].props.description, undefined);
     tree = await show({ sdr_saturation: 2.5, hdr_saturation: 1.4 });
     const [sdrSlider, hdrSlider] = tree.filter(n => n.type === "SliderField");
     assert.match(sdrSlider.props.description, /^Past 200% the strongest colours start clipping and lose detail\.$/);

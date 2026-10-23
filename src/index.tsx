@@ -26,6 +26,7 @@ interface State {
   sdr_applied: boolean;
   hdr_applied: boolean;
   hdr_applied_saturation: number | null;
+  sdr_look_saturation: number | null;
   sdr_error: string;
   sdr_look_error: string;
   hdr_error: string;
@@ -364,7 +365,12 @@ const Content: FC = () => {
               <Field
                 label="Now"
                 description={
-                  state.sdr_generating ? "Preparing the colours..." : undefined
+                  state.sdr_generating
+                    ? "Preparing the colours..."
+                    // Only a standard-gamut panel past the atom's range has a look.
+                    : state.sdr_look_saturation !== null
+                      ? `Last applied: ${pct(state.sdr_look_saturation)}`
+                      : undefined
                 }
                 focusable
               >

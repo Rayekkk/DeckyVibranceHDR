@@ -111,7 +111,7 @@ and install the release ZIP manually. The updater offers published releases.
 1. Open **Decky Vibrance HDR** in the Quick Access Menu.
 2. Turn on **Enabled** under **SDR saturation** or **HDR saturation**.
 3. Start at **100%**, then increase **Saturation** until you like the result.
-4. Let the change finish and check **Now**, the HDR **Last applied** status and any error.
+4. Let the change finish and check **Now**, the **Last applied** status and any error.
 
 The slider shows your latest selection immediately. Applying it can take longer,
 especially when a colour table is being built. The menu shows **Preparing the colours...**
@@ -129,6 +129,9 @@ The current build provides **100–300%**. The useful range depends on the panel
 wide-gamut screens show a clipping warning above **200%**, while standard-gamut
 screens using the additional colour table warn above **260%**. Beyond the warning,
 saturated colours can lose detail. Use the message beside the slider as your guide.
+
+While the additional colour table is in use, **Last applied** under **Now** shows
+the strength of that table, not the slider value, so it reads lower than **Now**.
 
 ### HDR saturation
 
