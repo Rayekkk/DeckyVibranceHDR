@@ -24,14 +24,15 @@ Unreleased.
 #### Display and colour
 
 - Disabling the plugin or restarting Decky puts the original colours back even
-  when the plugin was busy talking to a slow display server at that moment.
+  when the plugin was in the middle of another display change at that moment.
 - A screen that reports no EDID at all is treated as standard gamut, as gamescope
   treats it, so 101% no longer jumps to the strongest SDR setting there.
 - An unusual HDR entry in a screen's EDID no longer hides what the rest of the
   EDID says about HDR.
 - When the plugin starts while docked and the display server answers slowly, it
-  no longer briefly calibrates against the external display.
-- Slider and switch changes no longer wait for a slow background check of the display.
+  no longer takes its colour calibration from the external display.
+- Slider and switch changes wait less for background display checks when the
+  display server answers slowly.
 
 #### Settings and updates
 
