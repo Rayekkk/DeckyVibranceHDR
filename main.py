@@ -350,9 +350,9 @@ class Plugin:
 
     @staticmethod
     def _persist() -> None:
-        # Unload is the synchronous durability barrier. It holds the mutation
-        # lock and accepts no more edits; the writer lock also drains an older
-        # disk snapshot before this final one replaces it.
+        # Unload is the synchronous durability barrier. It never yields and
+        # accepts no more edits; the writer lock also drains an older disk
+        # snapshot before this final one replaces it.
         if not state.settings_loaded:
             return
         error = Plugin._write_settings()
@@ -1051,30 +1051,31 @@ class Plugin:
         # Decky kills a plugin still alive five seconds after SIGTERM. Keep
         # unavailable X servers from consuming that entire restore window.
         vibrance_x11.timeout = UNLOAD_XPROP_TIMEOUT_S
-        async with state.mutation_lock:
-            state.unloading = True
-            vibrance_lutfile.disabled = True
-            Plugin._invalidate_sdr_jobs()
-            Plugin._invalidate_hdr_jobs()
-            # From here on nothing gives the event loop back. Once Decky closes
-            # its end of the plugin socket, its listener in this process spins
-            # on the EOF without ever yielding, so anything awaited here would
-            # only end in the SIGKILL (seen on an Odin 3: Decky 3.3.0 under FEX;
-            # SteamDeckHomebrew/decky-loader issue 975).
-            # The settings go first: a reload cannot bring back an edit whose
-            # debounce has not run yet, and a slow X server must not hold them
-            # up. _persist leaves the file alone if startup has not read it.
-            for step in (Plugin._persist, vibrance_effects.release_sdr,
-                         lambda: vibrance_effects.release_look("hdr")):
-                try:
-                    step()
-                except Exception as exc:
-                    decky.logger.error(f"{LOG} unload step failed: {exc}")
-            # Cancelled while we hold the lock, a task cannot write after the
-            # restore: it meets the cancellation at its next await.
-            for task in state.tasks:
-                task.cancel()
-            state.tasks = []
+        # Nothing here gives the event loop back, not even to wait for the
+        # mutation lock. Once Decky closes its end of the plugin socket, its
+        # listener in this process spins on the EOF without ever yielding, so
+        # anything awaited here would only end in the SIGKILL (seen on an Odin
+        # 3: Decky 3.3.0 under FEX; SteamDeckHomebrew/decky-loader issue 975).
+        # A holder of the lock is parked on an executor call: these flags stop
+        # its writes, and its task is cancelled below before it resumes.
+        state.unloading = True
+        vibrance_lutfile.disabled = True
+        Plugin._invalidate_sdr_jobs()
+        Plugin._invalidate_hdr_jobs()
+        # The settings go first: a reload cannot bring back an edit whose
+        # debounce has not run yet, and a slow X server must not hold them
+        # up. _persist leaves the file alone if startup has not read it.
+        for step in (Plugin._persist, vibrance_effects.release_sdr,
+                     lambda: vibrance_effects.release_look("hdr")):
+            try:
+                step()
+            except Exception as exc:
+                decky.logger.error(f"{LOG} unload step failed: {exc}")
+        # A task cannot write after the restore: it meets the cancellation at
+        # its next await, the one it is parked on if it holds the lock.
+        for task in state.tasks:
+            task.cancel()
+        state.tasks = []
         decky.logger.info(f"{LOG} unloaded")
 
     async def _uninstall(self):

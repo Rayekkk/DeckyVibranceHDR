@@ -638,9 +638,11 @@ class MonitorLatency(PluginCase):
         await self.drain()
         M.Plugin._save.assert_called_once()
 
-    async def test_unload_bounds_reachability_probe_already_queued_by_monitor(self):
-        entered, release = threading.Event(), threading.Event()
-        timeouts = []
+    async def test_unload_does_not_wait_for_a_monitor_tick_holding_the_lock(self):
+        """Waiting for the lock gives the loop back, which a stopping Decky
+        never returns (see test_unload_and_uninstall_finish_without_giving_the_loop_back)."""
+        entered, release, probed = threading.Event(), threading.Event(), threading.Event()
+        timeouts, calls = [], []
         def read(_atom):
             entered.set()
             release.wait(2)
@@ -648,23 +650,33 @@ class MonitorLatency(PluginCase):
         def run(command, **kwargs):
             self.assertEqual(command, ["xprop", "-root"])
             timeouts.append(kwargs["timeout"])
+            probed.set()
             raise M.vibrance_x11.subprocess.TimeoutExpired(command, kwargs["timeout"])
         self.mock(M.vibrance_x11, "read_float_atom", side_effect=read)
         self.mock(M.vibrance_x11.subprocess, "run", side_effect=run)
+        self.mock(M.Plugin, "_persist", side_effect=lambda: calls.append("save"))
+        self.mock(M.vibrance_effects, "release_sdr", side_effect=lambda: calls.append("sdr"))
+        self.mock(M.vibrance_effects, "release_look", side_effect=calls.append)
         M.state.public.update(sdr_enabled=True, sdr_applied=True)
         M.state.last_sdr_written = 1.0
         watch = asyncio.create_task(self.plugin._watch_tick())
+        M.Plugin._track(watch)
         try:
             self.assertTrue(await asyncio.to_thread(entered.wait, 1))
-            unload = asyncio.create_task(self.plugin._unload())
-            await asyncio.sleep(0)
+            self.assertTrue(M.state.mutation_lock.locked())
+            with self.assertRaises(StopIteration, msg="unload waited for the lock"):
+                self.plugin._unload().send(None)
+            self.assertEqual(calls, ["save", "sdr", "hdr"])
         finally:
             release.set()
-        await watch
-        await unload
-        self.assertEqual(len(timeouts), 1)
+        with self.assertRaises(asyncio.CancelledError):
+            await watch
+        # The tick's own reachability probe still runs, bounded by the unload timeout.
+        self.assertTrue(await asyncio.to_thread(probed.wait, 1))
         self.assertLessEqual(timeouts[0], M.UNLOAD_XPROP_TIMEOUT_S,
                              "reachability can consume Decky's entire five-second stop budget")
+        self.float_writer.assert_not_called()
+        self.assertFalse(M.state.mutation_lock.locked())
 
 
 class SessionOwnership(PluginCase):
