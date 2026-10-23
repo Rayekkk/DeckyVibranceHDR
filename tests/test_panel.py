@@ -14,7 +14,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from _fixtures import PluginCase, PluginTest, drain, edid_with_red  # installs the loader stand-ins first
+from _fixtures import PluginCase, PluginTest, drain, edid_with_red, root_dump  # installs the loader stand-ins first
 import main as M
 import vibrance_edid
 import vibrance_lut as V
@@ -233,8 +233,8 @@ class Edid(PluginTest):
 
     def test_panel_reads_one_edid_and_invalidates_cache_when_path_changes(self):
         with patch.object(M.state, "panel_cache_key", None), patch.object(M.state, "panel_cache_complete", False), \
-                patch.object(M.vibrance_x11, "display_is_external", return_value=False), \
-                patch.object(M.vibrance_x11, "read_string_atom", side_effect=["/edid/one", "/edid/one", "/edid/two"]), \
+                patch.object(M.vibrance_x11, "read_root_properties", side_effect=[
+                    root_dump(False, "/edid/one"), root_dump(False, "/edid/one"), root_dump(False, "/edid/two")]), \
                 patch.object(M.vibrance_host, "read_edid", return_value=edid_cta(4)) as reader:
             M.vibrance_panel.configure_for_panel()
             M.vibrance_panel.configure_for_panel()
@@ -250,8 +250,8 @@ class Edid(PluginTest):
         blob[0x19:0x1d] = red[0x19:0x1d]
         blob = _harness.valid_edid(blob)
         with patch.object(M.state, "panel_cache_key", None), patch.object(M.state, "panel_cache_complete", False), \
-                patch.object(M.vibrance_x11, "display_is_external", return_value=False), \
-                patch.object(M.vibrance_x11, "read_string_atom", side_effect=["/edid/one", "/edid/one", "/edid/two"]), \
+                patch.object(M.vibrance_x11, "read_root_properties", side_effect=[
+                    root_dump(False, "/edid/one"), root_dump(False, "/edid/one"), root_dump(False, "/edid/two")]), \
                 patch.object(M.vibrance_host, "read_edid", return_value=blob) as reader:
             M.vibrance_panel.configure_for_panel()
             M.vibrance_panel.configure_for_panel()
@@ -302,10 +302,23 @@ assert len(os.listdir('/proc/self/fd'))==before
 
 class PanelCache(PluginTest):
     def test_missing_edid_path_does_not_spawn_a_duplicate_xprop_read(self):
-        with patch.object(M.vibrance_x11, "display_is_external", return_value=False), \
-                patch.object(M.vibrance_x11, "read_string_atom", return_value=None) as read:
+        with patch.object(M.vibrance_x11, "read_root_properties", return_value=root_dump(False)) as dump, \
+                patch.object(M.vibrance_x11, "xprop") as xprop:
             M.vibrance_panel.probe_panel()
-        read.assert_called_once_with(M.vibrance_x11.ATOM_EDID_PATH)
+        dump.assert_called_once_with(M.vibrance_x11.DISPLAY)
+        xprop.assert_not_called()
+
+    def test_a_timed_out_external_flag_does_not_calibrate_on_the_monitor(self):
+        """Docked at startup with a slow X server: separate reads could miss
+        IS_EXTERNAL yet find the monitor's EDID path, and measure the monitor."""
+        M.vibrance_panel.use_mapping(False)                     # a known standard panel
+        with patch.object(M.vibrance_x11, "read_root_properties", return_value=None), \
+                patch.object(M.vibrance_x11, "display_is_external", return_value=None), \
+                patch.object(M.vibrance_x11, "read_string_atom", return_value="/monitor/edid"), \
+                patch.object(M.vibrance_host, "read_edid", return_value=edid_with_red(0.708, 0.292)) as read:
+            M.vibrance_panel.configure_for_panel()
+        read.assert_not_called()
+        self.assertEqual((M.state.sdr_neutral_atom, M.state.sdr_atom_span), (0.0, 1.0))
 
     def test_atomic_edid_replacement_at_the_same_path_changes_panel_mapping(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -316,8 +329,7 @@ class PanelCache(PluginTest):
                     patch.object(M.state, "panel_cache_complete", False), \
                     patch.object(M.state, "sdr_neutral_atom", 1.0), \
                     patch.object(M.state, "sdr_atom_span", 2.0), \
-                    patch.object(M.vibrance_x11, "display_is_external", return_value=False), \
-                    patch.object(M.vibrance_x11, "read_string_atom", return_value=str(path)), \
+                    patch.object(M.vibrance_x11, "read_root_properties", return_value=root_dump(False, str(path))), \
                     patch.object(M.vibrance_host, "read_edid", wraps=M.vibrance_host.read_edid) as read:
                 M.vibrance_panel.configure_for_panel()
                 M.vibrance_panel.configure_for_panel()
@@ -474,7 +486,7 @@ class ExternalDisplay(PluginTest):
         M.state.settings_loaded = True  # the setters refuse before startup has read settings
 
     def _configure(self, external):
-        M.vibrance_x11.display_is_external = lambda: external
+        M.vibrance_x11.read_root_properties = lambda _display: root_dump(external)
         M.vibrance_panel.panel_is_wide_gamut = lambda *_args: True
         M.vibrance_panel.panel_supports_hdr = lambda *_args: True
         return M.vibrance_panel.configure_for_panel()
@@ -500,7 +512,7 @@ class ExternalDisplay(PluginTest):
 
     def test_stable_panel_reuses_its_cached_classification(self):
         calls = []
-        M.vibrance_x11.display_is_external = lambda: False
+        M.vibrance_x11.read_root_properties = lambda _display: root_dump(False)
         M.vibrance_panel.panel_is_wide_gamut = lambda *_args: calls.append("wide") or True
         M.vibrance_panel.panel_supports_hdr = lambda *_args: calls.append("hdr") or True
         M.state.panel_cache_key = None
@@ -515,7 +527,7 @@ class ExternalDisplay(PluginTest):
         self._configure(external=False)
         M.state.sdr_neutral_atom, M.state.sdr_atom_span = 1.0, 2.0
         probed = []
-        M.vibrance_x11.display_is_external = lambda: True
+        M.vibrance_x11.read_root_properties = lambda _display: root_dump(True)
         M.vibrance_panel.panel_is_wide_gamut = lambda *_args: probed.append(1) or False
         M.vibrance_panel.panel_supports_hdr = lambda *_args: probed.append(1) or False
         M.vibrance_panel.configure_for_panel()
@@ -548,7 +560,7 @@ class StartupOnExternalDisplay(PluginTest):
             calls.append((atom, value)) or True)
         M.vibrance_x11.write_string_atom = lambda atom, value: (
             calls.append((atom, value)) or True)
-        M.vibrance_x11.display_is_external = lambda: True
+        M.vibrance_x11.read_root_properties = lambda _display: root_dump(True)
         M.vibrance_panel.panel_is_wide_gamut = lambda *_args: self.fail(
             "external panel must not be measured")
         M.vibrance_panel.panel_supports_hdr = lambda *_args: self.fail(
@@ -575,11 +587,11 @@ class DisplayTransitions(PluginCase):
 
     async def test_slow_panel_probe_does_not_block_slider_mutations(self):
         started, release = threading.Event(), threading.Event()
-        def external():
+        def dump(_display):
             started.set()
             release.wait(10)
-            return False
-        self.mock(M.vibrance_x11, "display_is_external", side_effect=external)
+            return root_dump(False)
+        self.mock(M.vibrance_x11, "read_root_properties", side_effect=dump)
         panel = asyncio.create_task(self.plugin._refresh_panel())
         change = None
         try:
@@ -763,7 +775,7 @@ class KernelEdidHdr(PluginCase):
             self.mock(M, "_pick_display", return_value=":0")
             self.mock(M.vibrance_x11, "count_gamescope_atoms", return_value=44)
             self.mock(M, "GAMESCOPE_SETTLE_S", 0)
-            self.mock(M.vibrance_x11, "display_is_external", return_value=False)
+            self.mock(M.vibrance_x11, "read_root_properties", return_value=root_dump(False))
             self.mock(M.vibrance_effects, "capture_existing_looks")
             self.mock(self.plugin, "_reassert_repeatedly", return_value=None)
             M.state.panel_cache_key = None

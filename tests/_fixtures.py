@@ -71,6 +71,17 @@ def edid_with_red(red_x: float, red_y: float) -> bytes:
     return _harness.valid_edid(blob)
 
 
+def root_dump(external=None, edid_path=None):
+    """`xprop -root` with gamescope's two panel atoms; None leaves one out."""
+    lines = ["GAMESCOPE_FOCUSED_APP(CARDINAL) = 0"]
+    if external is not None:
+        lines.append(f"{M.vibrance_x11.ATOM_IS_EXTERNAL}(CARDINAL) = {int(external)}")
+    if edid_path is not None:
+        quoted = edid_path.replace("\\", "\\\\").replace('"', '\\"')
+        lines.append(f'{M.vibrance_x11.ATOM_EDID_PATH}(UTF8_STRING) = "{quoted}"')
+    return "\n".join(lines)
+
+
 def _snapshot(namespace):
     """Every attribute of a class or module, and the contents of its dicts and lists."""
     entries = {key: value for key, value in vars(namespace).items()

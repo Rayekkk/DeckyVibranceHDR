@@ -92,10 +92,13 @@ def monitor_probe():
 def probe_panel(metadata=None):
     """Read display metadata without mutating settings or owning atoms."""
     if metadata is None:
-        external_value = vibrance_x11.display_is_external()
-        edid_path = None if external_value is True else vibrance_x11.read_string_atom(ATOM_EDID_PATH)
-    else:
-        external_value, edid_path = metadata
+        # One root dump, as the monitor takes. Two reads let a timed-out
+        # IS_EXTERNAL pass for an absent one beside an external EDID path.
+        _count, probe = monitor_probe() or (0, None)
+        if probe is not None:
+            return probe
+        metadata = (None, None)
+    external_value, edid_path = metadata
     if not edid_path and external_value is not True:
         edid_path = vibrance_host.builtin_panel_edid_path()
     identity = vibrance_host.file_identity(edid_path)

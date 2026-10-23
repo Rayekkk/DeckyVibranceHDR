@@ -17,7 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from _fixtures import PluginCase, PluginTest, READ_STRING_ATOM, SAVE_SETTINGS, drain, edid_with_red  # installs the loader stand-ins first
+from _fixtures import PluginCase, PluginTest, READ_STRING_ATOM, SAVE_SETTINGS, drain, edid_with_red, root_dump  # installs the loader stand-ins first
 import main as M
 
 
@@ -427,6 +427,7 @@ class IsolatedStartup(PluginTest):
                    (M.vibrance_x11, "write_string_atom", lambda *_args: True),
                    (M.vibrance_x11, "write_float_atom", lambda *_args: True),
                    (M.vibrance_x11, "display_is_external", lambda: False),
+                   (M.vibrance_x11, "read_root_properties", lambda _display: root_dump(False)),
                    (M.vibrance_x11, "session_identity", lambda: None)]
         for obj, name, value in patches:
             item = patch.object(obj, name, value)
