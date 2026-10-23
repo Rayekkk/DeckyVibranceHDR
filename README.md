@@ -131,7 +131,7 @@ screens using the additional colour table warn above **260%**. Beyond the warnin
 saturated colours can lose detail. Use the message beside the slider as your guide.
 
 While the additional colour table is in use, **Last applied** under **Now** shows
-the strength of that table, not the slider value, so it reads lower than **Now**.
+the slider value of the last table handed to gamescope.
 
 ### HDR saturation
 

@@ -248,6 +248,12 @@ class SdrLookSplit(PluginTest):
         self.assertAlmostEqual(M.vibrance_effects.sdr_split(3.0)[1], 1.5)
         self.assertAlmostEqual(M.vibrance_effects.sdr_split(2.5)[1], 1.25)
 
+    def test_the_slider_is_twice_the_look_where_there_is_one(self):
+        """The panel shows the SDR look's Last applied as 2 x look."""
+        self._standard()
+        for value in (2.01, 2.5, 2.8, M.vibrance_effects.SDR_MAX_STANDARD):
+            self.assertAlmostEqual(2 * M.vibrance_effects.sdr_split(value)[1], value, msg=str(value))
+
     def test_the_look_ramps_rather_than_jumping(self):
         self._standard()
         looks = [M.vibrance_effects.sdr_split(v)[1] for v in (2.0, 2.25, 2.5, 2.75, 3.0)]

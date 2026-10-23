@@ -367,9 +367,10 @@ const Content: FC = () => {
                 description={
                   state.sdr_generating
                     ? "Preparing the colours..."
-                    // Only a standard-gamut panel past the atom's range has a look.
+                    // Only a standard-gamut panel past the atom's range has a look,
+                    // and there the slider is twice the look (test_controls SdrLookSplit).
                     : state.sdr_look_saturation !== null
-                      ? `Last applied: ${pct(state.sdr_look_saturation)}`
+                      ? `Last applied: ${pct(2 * state.sdr_look_saturation)}`
                       : undefined
                 }
                 focusable
