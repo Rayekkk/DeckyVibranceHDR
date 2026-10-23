@@ -8,12 +8,11 @@ const manifest = JSON.parse(readFileSync(new URL("./plugin.json", import.meta.ur
 // and deletion plugins (which pulled in vulnerable glob dependencies).
 export default {
   input: "src/index.tsx", context: "window",
-  external: ["react", "react-dom", "@decky/ui"],
+  external: ["react", "@decky/ui"],
   plugins: [{ name: "clean-plugin-output", buildStart() {
       rmSync(new URL("./dist", import.meta.url), { recursive: true, force: true });
     } }, typescript(), nodeResolve({ browser: true }),
-    externalGlobals({ react: "SP_REACT", "react/jsx-runtime": "SP_JSX",
-      "react-dom": "SP_REACTDOM", "@decky/ui": "DFL",
+    externalGlobals({ react: "SP_REACT", "react/jsx-runtime": "SP_JSX", "@decky/ui": "DFL",
       "@decky/manifest": JSON.stringify(manifest) })],
   output: { dir: "dist", format: "esm", exports: "default", sourcemap: true,
     // Rollup hands this hook native separators; on Windows the prefix only
