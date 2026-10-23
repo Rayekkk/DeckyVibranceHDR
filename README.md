@@ -190,7 +190,7 @@ a notice clears by itself once the backend answers.
 | External display → Standing down | Adjustments are paused for the external screen. Return to the built-in display to resume the saved choices. |
 | building the LUT... or an older Last LUT sent value | Wait for the latest build. If it stays pending, check the error and backend connection; build time is not fixed across devices. |
 | An update check or download failed | Read the error and try again, or download the attached plugin ZIP from Releases and install it through Decky. |
-| Reloading takes several seconds | Decky 3.2.10 showed a loader shutdown issue during audits on both devices. The plugin cannot patch that loader issue. See the [Odin 3 / Armada audit](docs/AUDITS.md#device-validation-latest) for the reproduced limitation. |
+| Reloading takes several seconds | Decky 3.2.10 showed a loader shutdown issue during audits on both devices, and Decky 3.3.0 showed it again on the Odin 3 under FEX. The plugin cannot patch that loader issue. See the [Odin 3 / Armada audit](docs/AUDITS.md#device-validation-latest) for the reproduced limitation. |
 
 When reporting a problem, include the plugin version, device, SteamOS/Armada and
 Decky versions, the affected control and its exact status/error.
