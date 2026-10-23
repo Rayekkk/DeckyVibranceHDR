@@ -183,11 +183,8 @@ class Edid(PluginTest):
     def test_malformed_cta_extensions_are_unknown(self):
         short_end = bytearray(edid_cta(4))
         short_end[130] = 3                       # data blocks would end before they start
-        short_metadata = bytearray(edid_cta())
-        short_metadata[130] = 7
-        short_metadata[132:135] = bytes((0xe2, 6, 4))  # HDR metadata cut to two bytes
-        for blob in (short_end, short_metadata):
-            self.assertIsNone(vibrance_edid.supports_pq(_harness.valid_edid(blob)))
+        # A too-short HDR block is skipped like the kernel does (tests/test_edid.py).
+        self.assertIsNone(vibrance_edid.supports_pq(_harness.valid_edid(short_end)))
 
     def test_a_new_white_point_alone_counts_as_a_change(self):
         """The SDR look is built for the panel's white, so it has to be rebuilt."""
