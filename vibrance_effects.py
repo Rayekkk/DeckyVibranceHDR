@@ -264,6 +264,9 @@ def commit_look(component, path, slot, value) -> None:
     # A foreign writer may have changed while we built, even when this
     # replaces an already owned LUT.
     capture_look_baseline(component, vibrance_x11.read_string_atom(look["atom"]))
+    # Unload restores without waiting for this worker; it must not write after.
+    if state.unloading:
+        return
     if vibrance_x11.write_string_atom(look["atom"], path):
         setattr(state, look["slot"], slot)
         setattr(state, look["path"], path)
@@ -323,6 +326,8 @@ def reapply_look(component, path, live) -> None:
         return
     if not state.can_restore_session():
         state.set_error(look["error"], f"waiting for gamescope before applying the {look['label']} look")
+        return
+    if state.unloading:
         return
     if not vibrance_x11.write_string_atom(look["atom"], path):
         state.set_error(look["error"],

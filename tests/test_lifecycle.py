@@ -1774,3 +1774,55 @@ class SettingsPathsStayOutOfTheLog(PluginCase):
         for text in (notice, logged):
             self.assertIn(aside.name, text)
             self.assertNotIn(folder, text)
+
+
+class UnloadBeatsALookWorker(PluginCase):
+    """Unload restores without waiting for the mutation lock, so a look
+    write already running in a worker thread must not land after it."""
+
+    def _block_worker_read(self, nth):
+        """read_string_atom blocks on its nth call from a worker thread."""
+        entered, release = threading.Event(), threading.Event()
+        count = [0]
+        main_thread = threading.main_thread()
+        def read(atom):
+            if threading.current_thread() is not main_thread:
+                count[0] += 1
+                if count[0] == nth:
+                    entered.set()
+                    release.wait(5)
+            return self.strings.get(atom)
+        self.mock(M.vibrance_x11, "read_string_atom", side_effect=read)
+        return entered, release
+
+    async def test_a_commit_in_flight_leaves_no_look_after_unload(self):
+        M.state.public.update(hdr_enabled=True, hdr_supported=True)
+        # The second worker read is commit_look's, just before its write.
+        entered, release = self._block_worker_read(2)
+        await self.plugin.set_hdr_saturation(1.4)
+        self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+        with self.assertRaises(StopIteration):
+            self.plugin._unload().send(None)
+        release.set()
+        await asyncio.sleep(0.3)
+        self.assertFalse(self.strings.get(M.vibrance_x11.ATOM_LOOK_PQ, "").endswith(".cube"))
+
+    async def test_a_slow_tick_reapply_in_flight_leaves_no_look_after_unload(self):
+        M.state.public.update(hdr_enabled=True, hdr_supported=True, hdr_applied=True,
+                              hdr_applied_saturation=1.4, hdr_saturation=1.4)
+        M.state.hdr_look_path = "/tmp/hdr-look-0.cube"
+        self.strings[M.vibrance_x11.ATOM_LOOK_PQ] = ""   # gamescope dropped the look
+        M.state.slow_checks = M.SLOW_CHECK_EVERY - 1
+        entered, release = self._block_worker_read(1)
+        watch = asyncio.create_task(self.plugin._watch_tick())
+        M.Plugin._track(watch)
+        self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+        with self.assertRaises(StopIteration):
+            self.plugin._unload().send(None)
+        release.set()
+        try:
+            await watch
+        except asyncio.CancelledError:
+            pass
+        await asyncio.sleep(0.3)
+        self.assertEqual(self.strings.get(M.vibrance_x11.ATOM_LOOK_PQ), "")
