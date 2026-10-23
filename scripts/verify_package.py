@@ -51,6 +51,11 @@ def verify(root):
         require(modules == set(backend(root)), "backend modules differ from the checkout")
         files = backend(root) + ("plugin.json", "package.json", "README.md", "CHANGELOG.md", "LICENSE",
                            "NOTICE", "dist/index.js", "dist/index.js.map")
+        # Anything else in the archive (a token, settings.json, a build/ folder) fails.
+        allowed = {prefix + name for name in files} | {prefix, prefix + "dist/", prefix + "third_party/"}
+        for name in names:
+            require(name in allowed or name.startswith(prefix + "third_party/decky-api/"),
+                    f"unexpected file in ZIP: {name}")
         for name in files:
             require(archive.read(prefix + name) == (root / name).read_bytes(), f"stale/missing payload: {name}")
         package = json.loads(archive.read(prefix + "package.json"))
