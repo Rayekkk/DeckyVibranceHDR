@@ -12,7 +12,7 @@
  */
 
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, cpSync, readFileSync, readdirSync, renameSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, cpSync, readFileSync, readdirSync, renameSync, utimesSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -83,6 +83,13 @@ for (const entry of ["LICENSE", "package.json", "dist", "src", "README.md"]) {
   else if (["LICENSE", "package.json", "dist", "src"].includes(entry)) fail(`@decky/api ${entry} is missing`);
 }
 
+// The same files give the same archive: fixed timestamps (zip stores local
+// time, hence a local date) and one sorted entry list instead of readdir order.
+const FIXED_TIME = new Date(2000, 0, 1);
+const entries = [PLUGIN_DIR_NAME, ...readdirSync(stageDir, { recursive: true })
+  .map(path => `${PLUGIN_DIR_NAME}/${path.replaceAll("\\", "/")}`)].sort();
+for (const entry of entries) utimesSync(join(buildDir, entry), FIXED_TIME, FIXED_TIME);
+
 function sevenZip() {
   const candidates = [
     "C:\\Program Files\\7-Zip\\7z.exe",
@@ -94,11 +101,13 @@ function sevenZip() {
 const sevenZipPath = sevenZip();
 try {
   if (sevenZipPath) {
-    execFileSync(sevenZipPath, ["a", "-tzip", "-mx=9", pendingZip, PLUGIN_DIR_NAME],
+    // -mtm=off: no NTFS timestamps, every entry is 1980-01-01 whatever the time zone.
+    execFileSync(sevenZipPath, ["a", "-tzip", "-mx=9", "-mtm=off", pendingZip, PLUGIN_DIR_NAME],
       { cwd: buildDir, stdio: "inherit" });
   } else {
-    execFileSync("zip", ["-r", "-9", "-q", pendingZip, PLUGIN_DIR_NAME],
-      { cwd: buildDir, stdio: "inherit" });
+    // -X drops the extra timestamps and owners; -@ reads the sorted entry list.
+    execFileSync("zip", ["-X", "-9", "-q", pendingZip, "-@"],
+      { cwd: buildDir, input: entries.join("\n"), stdio: ["pipe", "inherit", "inherit"] });
   }
 } catch (err) {
   fail(
