@@ -12,6 +12,7 @@ runs (under the mutation lock, in a worker thread). Nothing imports `decky`.
 
 import os
 
+import vibrance_host
 import vibrance_lut
 import vibrance_lutfile
 import vibrance_state
@@ -114,7 +115,7 @@ def write_look(saturation: float, slot: int,
         built = vibrance_lutfile.write(path, saturation, encoding, source_white, cancelled)
     except Exception as e:
         if state.look_errors_logged.get(prefix) != str(e):  # retried every slow tick
-            vibrance_state.logger.error(f"{LOG} could not write look: {e}")
+            vibrance_state.logger.error(f"{LOG} could not write look: {vibrance_host.loggable(e)}")
             state.look_errors_logged[prefix] = str(e)
         return ""
     state.look_errors_logged.pop(prefix, None)

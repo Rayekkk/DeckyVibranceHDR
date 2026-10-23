@@ -102,6 +102,30 @@ class Updater(PluginTest):
                 self.assertEqual(f.read(), b"old")
             self.assertEqual(os.listdir(folder), ["release.zip"])
 
+    def test_download_logs_name_files_without_the_user_s_folders(self):
+        updater = self.make(False)
+        home = "/home/someone"
+        failure = PermissionError(13, "Permission denied", home + "/Downloads")
+        with patch.object(U, "real_user", return_value=SimpleNamespace(pw_dir=home, pw_uid=1, pw_gid=1)), \
+                patch.object(U, "xdg_download_dir", return_value=home + "/Downloads"), \
+                patch.object(U.os, "makedirs", side_effect=failure), \
+                patch.object(M.decky.logger, "error") as error:
+            result = updater.download("https://github.com/release.zip", "release.zip")
+        self.assertEqual(result, {"success": False, "error": str(failure)})   # the panel's text is unchanged
+        self.assertEqual(error.call_args[0][0], "test perform_update: Permission denied: Downloads")
+        payload = io.BytesIO()
+        with zipfile.ZipFile(payload, "w") as archive:
+            archive.writestr("plugin/main.py", "# plugin")
+        with tempfile.TemporaryDirectory() as folder, \
+                patch.object(U, "real_user", return_value=SimpleNamespace(pw_dir=folder, pw_uid=1, pw_gid=1)), \
+                patch.object(U, "xdg_download_dir", return_value=folder), \
+                patch.object(updater, "open_url", return_value=io.BytesIO(payload.getvalue())), \
+                patch.object(M.decky.logger, "info") as info:
+            self.assertTrue(updater.download("https://github.com/release.zip", "release.zip")["success"])
+        logged = " ".join(c.args[0] for c in info.call_args_list)
+        self.assertIn("update downloaded to release.zip", logged)
+        self.assertNotIn(folder, logged)
+
     def test_arbitrary_rpc_asset_is_rejected_before_disk_or_network(self):
         updater = self.make()
         with patch.object(U, "real_user") as user, patch.object(updater, "open_url") as opened:

@@ -251,6 +251,18 @@ class Lut(PluginTest):
                 self.assertEqual(M.vibrance_effects.write_look(1.3, 0), "")
             build.assert_not_called()
 
+    def test_a_failed_write_is_logged_without_the_user_s_folders(self):
+        folder = "/home/someone/homebrew/data/DeckyVibranceHDR"
+        failure = OSError(13, "Permission denied", folder + "/hdr-look-0.cube.123.tmp")
+        with patch.object(M.vibrance_lutfile, "write", side_effect=failure), \
+                patch.object(M.vibrance_effects, "runtime_dir", return_value=folder), \
+                patch.object(M.vibrance_state.logger, "error") as error:
+            self.assertEqual(M.vibrance_effects.write_look(1.3, 0, prefix="private-look"), "")
+        self.assertEqual(error.call_count, 1)
+        self.assertIn("Permission denied: hdr-look-0.cube.123.tmp", error.call_args[0][0])
+        self.assertNotIn("someone", error.call_args[0][0])
+        self.assertEqual(M.vibrance_host.loggable(ValueError("bad /x")), "bad /x")
+
     def test_an_unexpected_build_error_leaves_no_temporary_file(self):
         with tempfile.TemporaryDirectory() as folder:
             with patch.object(M.vibrance_effects, "runtime_dir", return_value=folder), \

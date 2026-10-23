@@ -73,6 +73,13 @@ def file_identity(path):
         return None
 
 
+def loggable(exc) -> str:
+    """*exc* without the folders of a path it names: they hold the user name."""
+    if isinstance(exc, OSError) and exc.strerror and exc.filename is not None:
+        return f"{exc.strerror}: {os.path.basename(str(exc.filename))}"
+    return str(exc)
+
+
 def remove_stale(folder, belongs) -> None:
     """Delete the entries of *folder* that *belongs* names and a killed
     process left behind.

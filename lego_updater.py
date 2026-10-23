@@ -106,6 +106,13 @@ class CheckedRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+def loggable(exc) -> str:
+    """*exc* without the folders of a path it names: they hold the user name."""
+    if isinstance(exc, OSError) and exc.strerror and exc.filename is not None:
+        return f"{exc.strerror}: {os.path.basename(str(exc.filename))}"
+    return str(exc)
+
+
 def version_key(text: str):
     """SemVer precedence, including prereleases and ignoring build metadata."""
     match = re.fullmatch(
@@ -481,10 +488,10 @@ class Updater:
                     os.chmod(tmp, 0o644)
             os.replace(tmp, dest)
 
-            self._info(f"update downloaded to {dest} ({written} bytes)")
+            self._info(f"update downloaded to {os.path.basename(dest)} ({written} bytes)")
             return {"success": True, "path": dest}
         except Exception as e:
-            self._error(f"perform_update: {e}")
+            self._error(f"perform_update: {loggable(e)}")
             # Never leave a truncated or oversized file behind.
             if tmp:
                 try:
