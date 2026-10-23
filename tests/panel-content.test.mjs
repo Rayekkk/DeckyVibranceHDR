@@ -50,6 +50,8 @@ test("sections, labels and the HDR and reset controls follow the backend", async
     assert.equal(nows[1].props.description, "Preparing the colours...");
     tree = await show({});
     assert.equal(field(tree, "Now")[1].props.description, "100% is neutral, nothing to apply");
+    tree = await show({ hdr_saturation: 1.4, hdr_applied_saturation: 1.3 });
+    assert.equal(field(tree, "Now")[1].props.description, "Last applied: 130%");
     // The SDR look exists only on a standard-gamut panel past 200%; a wide one never reports it.
     tree = await show({ sdr_saturation: 2.8, sdr_look_saturation: 1.4 });
     assert.equal(field(tree, "Now")[0].props.description, "Last applied: 280%");
