@@ -2,6 +2,46 @@
 
 All notable changes to Decky Vibrance HDR, newest first.
 
+## [Unreleased]
+
+Unreleased.
+
+### Changed
+
+#### Menu
+
+- Descriptions in the menu use plain words instead of terms such as LUT, EDID
+  or gamut. Control names are unchanged.
+- **Last applied** replaces "Last LUT sent" under **Now** and also appears for SDR
+  on screens that use the additional colour table above 200%.
+- A setting that fails after you close the menu now shows the **Setting failed**
+  message instead of the slider silently moving back the next time you open it.
+- While an external display is connected, the menu explains that your saved
+  settings apply again once you unplug it.
+
+### Fixed
+
+#### Display and colour
+
+- Disabling the plugin or restarting Decky puts the original colours back even
+  when the plugin was busy talking to a slow display server at that moment.
+- A screen that reports no EDID at all is treated as standard gamut, as gamescope
+  treats it, so 101% no longer jumps to the strongest SDR setting there.
+- An unusual HDR entry in a screen's EDID no longer hides what the rest of the
+  EDID says about HDR.
+- When the plugin starts while docked and the display server answers slowly, it
+  no longer briefly calibrates against the external display.
+- Slider and switch changes no longer wait for a slow background check of the display.
+
+#### Settings and updates
+
+- Settings survive a power cut right after a change, and files left by an
+  interrupted save are cleaned up.
+- An update download that ends early is reported as failed instead of being
+  kept, and a download in progress stops when the plugin stops.
+- Logs and settings errors name only the file, not the folders that contain
+  your user name.
+
 ## [1.2.0] - 2026-10-21
 
 ### Fixed
