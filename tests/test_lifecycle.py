@@ -1710,6 +1710,14 @@ class UnloadSurvivesAFailedRestore(PluginCase):
         self.assertEqual(saved, [1])
         self.assertTrue(any("X gone" in c.args[0] for c in error.call_args_list))
 
+    async def test_unload_cancels_a_download_in_progress(self):
+        cancel = self.mock(M, "cancel_downloads")
+        self.mock(M.Plugin, "_persist")
+        self.mock(M.vibrance_effects, "release_sdr")
+        self.mock(M.vibrance_effects, "release_look")
+        await self.plugin._unload()
+        cancel.assert_called_once_with()
+
     async def test_unload_and_uninstall_finish_without_giving_the_loop_back(self):
         """Once Decky closes its end of the plugin socket, its listener in our
         process spins on the EOF and the event loop never runs anything else,

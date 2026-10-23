@@ -39,7 +39,7 @@ if PLUGIN_DIR not in sys.path:
 
 # Not `updater`: the loader aliases its own decky_loader.updater to that bare
 # name before we are imported, and sys.modules wins over sys.path.
-from lego_updater import Updater  # noqa: E402
+from lego_updater import Updater, cancel_downloads  # noqa: E402
 import vibrance_effects  # noqa: E402
 import vibrance_host  # noqa: E402
 import vibrance_lut  # noqa: E402
@@ -1083,6 +1083,9 @@ class Plugin:
         vibrance_lutfile.disabled = True
         Plugin._invalidate_sdr_jobs()
         Plugin._invalidate_hdr_jobs()
+        # A download thread would keep the process past Decky's five seconds
+        # and leave its .part file behind.
+        cancel_downloads()
         # The settings go first: a reload cannot bring back an edit whose
         # debounce has not run yet, and a slow X server must not hold them
         # up. _persist leaves the file alone if startup has not read it.
