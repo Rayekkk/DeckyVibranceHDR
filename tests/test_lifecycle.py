@@ -641,42 +641,67 @@ class MonitorLatency(PluginCase):
     async def test_unload_does_not_wait_for_a_monitor_tick_holding_the_lock(self):
         """Waiting for the lock gives the loop back, which a stopping Decky
         never returns (see test_unload_and_uninstall_finish_without_giving_the_loop_back)."""
-        entered, release, probed = threading.Event(), threading.Event(), threading.Event()
-        timeouts, calls = [], []
-        def read(_atom):
+        entered, release, finished = threading.Event(), threading.Event(), threading.Event()
+        calls = []
+        def check_looks():
             entered.set()
             release.wait(2)
-            return None
-        def run(command, **kwargs):
-            self.assertEqual(command, ["xprop", "-root"])
-            timeouts.append(kwargs["timeout"])
-            probed.set()
-            raise M.vibrance_x11.subprocess.TimeoutExpired(command, kwargs["timeout"])
-        self.mock(M.vibrance_x11, "read_float_atom", side_effect=read)
-        self.mock(M.vibrance_x11.subprocess, "run", side_effect=run)
+        watch_once = M.Plugin._watch_once
+        self.mock(M.Plugin, "_watch_once", side_effect=lambda *args: (watch_once(*args), finished.set()))
+        self.mock(M.vibrance_effects, "reassert_looks_if_dropped", side_effect=check_looks)
         self.mock(M.Plugin, "_persist", side_effect=lambda: calls.append("save"))
         self.mock(M.vibrance_effects, "release_sdr", side_effect=lambda: calls.append("sdr"))
         self.mock(M.vibrance_effects, "release_look", side_effect=calls.append)
+        M.state.slow_checks = M.SLOW_CHECK_EVERY - 1
         M.state.public.update(sdr_enabled=True, sdr_applied=True)
         M.state.last_sdr_written = 1.0
+        self.live_sdr = 0.5                     # the tick would put ours back
         watch = asyncio.create_task(self.plugin._watch_tick())
         M.Plugin._track(watch)
         try:
             self.assertTrue(await asyncio.to_thread(entered.wait, 1))
             self.assertTrue(M.state.mutation_lock.locked())
+            calls.clear()                       # the slow tick's own HDR release
             with self.assertRaises(StopIteration, msg="unload waited for the lock"):
                 self.plugin._unload().send(None)
             self.assertEqual(calls, ["save", "sdr", "hdr"])
+            self.assertEqual(M.vibrance_x11.timeout, M.UNLOAD_XPROP_TIMEOUT_S)
         finally:
             release.set()
         with self.assertRaises(asyncio.CancelledError):
             await watch
-        # The tick's own reachability probe still runs, bounded by the unload timeout.
-        self.assertTrue(await asyncio.to_thread(probed.wait, 1))
-        self.assertLessEqual(timeouts[0], M.UNLOAD_XPROP_TIMEOUT_S,
-                             "reachability can consume Decky's entire five-second stop budget")
-        self.float_writer.assert_not_called()
+        self.assertTrue(await asyncio.to_thread(finished.wait, 1))
+        self.float_writer.assert_not_called()   # nothing lands after the restore
         self.assertFalse(M.state.mutation_lock.locked())
+
+    async def test_a_slow_sdr_read_does_not_block_slider_changes(self):
+        entered, release = threading.Event(), threading.Event()
+        reads = []
+        def read(_atom):
+            reads.append(1)
+            if len(reads) == 1:
+                entered.set()
+                release.wait(10)
+                return 0.5                      # outdated by the move below
+            return self.live_sdr
+        self.mock(M.vibrance_x11, "read_float_atom", side_effect=read)
+        M.state.public.update(sdr_enabled=True, sdr_applied=True)
+        M.state.last_sdr_written = M.state.last_sdr_attempted = 0.8
+        watch = asyncio.create_task(self.plugin._watch_tick())
+        change = None
+        try:
+            self.assertTrue(await asyncio.to_thread(entered.wait, 1))
+            change = asyncio.create_task(self.plugin.set_sdr_saturation(1.4))
+            done, _ = await asyncio.wait([change], timeout=2)
+            self.assertIn(change, done, "a slow X server held the settings lock")
+            await self.drain()                  # the move is written
+        finally:
+            release.set()
+            await watch
+            if change is not None:
+                await change
+        self.assertEqual(len(reads), 2, "the outdated reading was not taken again")
+        self.assertEqual(M.state.reassert_strikes, 0)
 
 
 class SessionOwnership(PluginCase):

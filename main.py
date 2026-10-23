@@ -561,7 +561,19 @@ class Plugin:
                 "one wins, so keep only one enabled")
 
     @staticmethod
-    def _watch_once(foreign) -> None:
+    def _read_sdr():
+        """The SDR atom and, should that read fail, whether gamescope is still
+        on this display: None also means an unreachable X server."""
+        live = vibrance_x11.read_float_atom(ATOM_SDR_WIDENESS)
+        return live, live is not None or vibrance_x11.count_gamescope_atoms(vibrance_x11.DISPLAY) > 0
+
+    @staticmethod
+    def _sdr_reading_key():
+        # A slider move, a write of ours or a new session outdates a reading.
+        return state.sdr_generation, state.session_identity, state.last_sdr_attempted
+
+    @staticmethod
+    def _watch_once(foreign, sdr=None) -> None:
         """Put our value back when something drops it, and only call it a
         conflict once that keeps happening.
 
@@ -571,7 +583,8 @@ class Plugin:
         the strike count is there to tell apart.
 
         *foreign* is a reading of the other X servers taken outside the lock
-        (None when there is none this tick).
+        (None when there is none this tick); *sdr* is _read_sdr() taken there
+        too, or None to read it here.
         """
         # Look health is independent of the SDR atom. In particular, an HDR-only
         # configuration still needs its slow readback check, and a failed clear
@@ -604,11 +617,10 @@ class Plugin:
         if not state.reassert_strikes:
             state.public["conflict"] = foreign_conflict
 
-        live = vibrance_x11.read_float_atom(ATOM_SDR_WIDENESS)
+        live, present = sdr if sdr is not None else Plugin._read_sdr()
         if live is None:
-            # None also means an unreachable X server. Only recreate the
-            # property when gamescope is still present on this display.
-            if vibrance_x11.count_gamescope_atoms(vibrance_x11.DISPLAY) > 0:
+            # Only recreate the property when gamescope is still present.
+            if present:
                 vibrance_effects.apply_sdr()
             else:
                 state.set_error("sdr", "could not reach gamescope; retrying")
@@ -670,15 +682,20 @@ class Plugin:
         state.reassert_strikes = 0
 
     async def _watch_tick(self):
-        # Reading other X servers is independent of our settings. A stalled
-        # secondary server must not hold the control mutation lock.
-        foreign = None
-        if (state.slow_checks + 1 >= SLOW_CHECK_EVERY
-                and state.public["sdr_enabled"] and state.public["sdr_applied"]):
-            foreign = await _offload(vibrance_x11.foreign_sdr_values)
+        # The atoms are read before the lock: a slow or stalled X server must
+        # not hold up the controls. A reading a write of ours has outdated in
+        # the meantime is taken again under the lock.
+        foreign = sdr = None
+        if state.public["sdr_enabled"] and state.public["sdr_applied"]:
+            if state.slow_checks + 1 >= SLOW_CHECK_EVERY:
+                foreign = await _offload(vibrance_x11.foreign_sdr_values)
+            key = Plugin._sdr_reading_key()
+            sdr = await _offload(Plugin._read_sdr)
         async with state.mutation_lock:
             if not state.unloading and not state.disconnected:
-                await _offload(Plugin._watch_once, foreign)
+                if sdr is not None and key != Plugin._sdr_reading_key():
+                    sdr = None
+                await _offload(Plugin._watch_once, foreign, sdr)
                 # A pending look is a full LUT build. A first failure is retried
                 # on the next tick; a repeat only on the slow tick (about every
                 # 16 s), which _watch_once has just reset the counter for.
