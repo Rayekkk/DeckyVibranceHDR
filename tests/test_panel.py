@@ -150,7 +150,8 @@ class HdrCapability(PluginTest):
     def test_a_block_promising_more_than_it_holds_does_not_read_past_it(self):
         edid = bytearray(self._edid(0b0000_0101))
         edid[128 + 2] = 127                   # collection runs to the very end
-        self.assertIn(vibrance_edid.supports_pq(_harness.valid_edid(edid)), (True, False))
+        # The HDR block inside the collection still answers; the checksum does not.
+        self.assertIs(vibrance_edid.supports_pq(_harness.valid_edid(edid)), True)
 
 
 class Edid(PluginTest):
