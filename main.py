@@ -1078,7 +1078,7 @@ class Plugin:
         # anything awaited here would only end in the SIGKILL (seen on an Odin
         # 3: Decky 3.3.0 under FEX; SteamDeckHomebrew/decky-loader issue 975).
         # A holder of the lock is parked on an executor call: these flags stop
-        # its writes, and its task is cancelled below before it resumes.
+        # its writes, and a tracked task is also cancelled below.
         state.unloading = True
         vibrance_lutfile.disabled = True
         Plugin._invalidate_sdr_jobs()
