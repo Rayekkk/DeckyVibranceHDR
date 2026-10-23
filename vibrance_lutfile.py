@@ -24,7 +24,7 @@ import vibrance_lut
 SIZE = 33
 
 # A cancelled run_in_executor job keeps running. Serialising writes prevents it
-# from sharing the fixed temporary name with its replacement.
+# from sharing the process's temporary name with its replacement.
 lock = threading.RLock()
 # Metadata only: the two HDR and two SDR slots already contain the LUT text.
 _cache = OrderedDict()
@@ -80,7 +80,8 @@ def write(path, saturation, encoding, source_white, cancelled) -> bool:
     never loads half a table. An identical request whose file is unchanged on
     disk is not built again.
     """
-    tmp = path + ".tmp"
+    # Unique per process: writes within one are serialised by the lock.
+    tmp = f"{path}.{os.getpid()}.tmp"
     with lock:
         if disabled or cancelled():
             return False
@@ -96,9 +97,17 @@ def write(path, saturation, encoding, source_white, cancelled) -> bool:
                     return False
                 _cache.move_to_end(path)
                 return True
+            _sweep(path)
             # Opened first: a folder that cannot be written fails here, before
             # the build, instead of after a full 33-cube on every retry.
-            with open(tmp, "w") as f:
+            # Created fresh, never through a link someone left at the name.
+            try:
+                os.unlink(tmp)
+            except FileNotFoundError:
+                pass
+            with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                                   | getattr(os, "O_NOFOLLOW", 0)
+                                   | getattr(os, "O_CLOEXEC", 0), 0o644), "w") as f:
                 text = generate(saturation, SIZE, encoding, source_white, cancelled)
                 if disabled or cancelled():
                     raise vibrance_lut.BuildCancelled()
@@ -126,6 +135,27 @@ def write(path, saturation, encoding, source_white, cancelled) -> bool:
             if isinstance(e, vibrance_lut.BuildCancelled):
                 return False
             raise
+
+
+def _sweep(path) -> None:
+    """Remove temporaries a killed process left beside *path*.
+
+    Only old ones: another instance may be mid-build during a reload, and the
+    native worker's deadline is 30 s.
+    """
+    folder, name = os.path.split(path)
+    try:
+        entries = os.listdir(folder or ".")
+    except OSError:
+        return
+    for entry in entries:
+        if entry.startswith(name + ".") and entry.endswith(".tmp"):
+            stale = os.path.join(folder, entry)
+            try:
+                if time.time() - os.lstat(stale).st_mtime > 60:
+                    os.unlink(stale)
+            except OSError:
+                pass
 
 
 def wait_for_writer() -> None:

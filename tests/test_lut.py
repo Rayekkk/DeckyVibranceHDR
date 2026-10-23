@@ -11,6 +11,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+import unittest
 from collections import OrderedDict
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -505,6 +507,48 @@ class LutFileWrites(PluginTest):
             path = os.path.join(folder, "hdr-look-0.cube")
             self.assertFalse(M.vibrance_lutfile.write(path, 1.2, "pq", V.D65, lambda: False))
             self.assertEqual(os.listdir(folder), [])
+
+    @staticmethod
+    def _write(path):
+        with patch.object(M.vibrance_lutfile, "disabled", False), \
+                patch.object(M.vibrance_lutfile, "_cache", OrderedDict()), \
+                patch.object(M.vibrance_lutfile, "generate", return_value="LUT\n"):
+            return M.vibrance_lutfile.write(path, 1.2, "pq", V.D65, lambda: False)
+
+    def _write_beside(self, plant):
+        """Write slot 0 after *plant* aliased a victim at each temporary name."""
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "hdr-look-0.cube")
+            victim = os.path.join(folder, "victim")
+            Path(victim).write_text("victim")
+            for name in (path + ".tmp", f"{path}.{os.getpid()}.tmp"):
+                plant(victim, name)
+            self.assertTrue(self._write(path))
+            self.assertEqual(Path(victim).read_text(), "victim")
+            self.assertFalse(os.path.islink(path))
+            self.assertFalse(os.path.samefile(path, victim))
+            self.assertEqual(Path(path).read_text(), "LUT\n")
+
+    @unittest.skipUnless(os.name == "posix", "symlinks need POSIX")
+    def test_a_symlink_at_the_temporary_name_is_not_followed(self):
+        self._write_beside(os.symlink)
+
+    def test_a_hard_link_at_the_temporary_name_is_not_written_through(self):
+        self._write_beside(os.link)
+
+    def test_only_old_temporaries_of_the_same_slot_are_swept(self):
+        with tempfile.TemporaryDirectory() as folder:
+            aged = ["hdr-look-0.cube.tmp", "hdr-look-0.cube.999.tmp",
+                    "hdr-look-1.cube.999.tmp", "settings-abc123", "settings.json"]
+            fresh = "hdr-look-0.cube.888.tmp"
+            old = time.time() - 24 * 3600
+            for name in aged + [fresh]:
+                Path(folder, name).write_text("x")
+            for name in aged:
+                os.utime(os.path.join(folder, name), (old, old))
+            self.assertTrue(self._write(os.path.join(folder, "hdr-look-0.cube")))
+            self.assertEqual(sorted(os.listdir(folder)),
+                             sorted(aged[2:] + [fresh, "hdr-look-0.cube"]))
 
     def test_the_native_worker_runs_isolated(self):
         worker = MagicMock()
