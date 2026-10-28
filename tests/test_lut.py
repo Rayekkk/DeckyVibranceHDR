@@ -19,8 +19,8 @@ from collections import OrderedDict
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-from _fixtures import PluginTest  # installs the loader stand-ins first
-import main as M
+from _fixtures import PluginTest, emulated_decky  # installs the decky stand-in first
+import vibrance_control as M
 import vibrance_lut as V
 
 
@@ -390,82 +390,65 @@ class LutOutput(PluginTest):
 
 
 class NativeLut(PluginTest):
+    """Under FEX the maths runs in the host's native Python (dk_process.run_helper); elsewhere in-process.
+    dk_process's own tests cover the emulator check, the deadline and the kill on cancel."""
+
     def test_native_output_matches_both_transfers_and_white_points(self):
-        with patch.object(M.vibrance_host, "native_python", return_value=sys.executable), patch.object(M.vibrance_lutfile, 'disabled', False):
+        with emulated_decky():
             for encoding, white in (('pq', V.D65), ('g22', V.D65), ('g22', (.30, .32))):
                 self.assertEqual(M.vibrance_lutfile.generate(1.37, 9, encoding, white, lambda: False),
                                  V.generate(1.37, 9, encoding, white))
 
-    def test_platform_selection_preserves_ordinary_steamos(self):
-        def elf(machine):
-            return b'\x7fELF\x02\x01' + bytes(12) + machine.to_bytes(2, 'little')
-        self.addCleanup(M.vibrance_host.interpreter_headers.cache_clear)  # leave no fake headers behind
-        for native, loader, expected in ((183, 62, '/proc/self/root/usr/bin/python3'), (62, 62, None), (183, 183, None)):
-            M.vibrance_host.interpreter_headers.cache_clear()  # cached in the plugin; each case reads afresh
-            with patch('builtins.open', side_effect=[io.BytesIO(elf(native)), io.BytesIO(elf(loader))]):
-                self.assertEqual(M.vibrance_host.native_python(), expected)
-
-    def test_a_passing_read_error_is_not_remembered(self):
-        M.vibrance_host.interpreter_headers.cache_clear()
-        self.addCleanup(M.vibrance_host.interpreter_headers.cache_clear)
-        arm = b'\x7fELF\x02\x01' + bytes(12) + (183).to_bytes(2, 'little')
-        x86 = b'\x7fELF\x02\x01' + bytes(12) + (62).to_bytes(2, 'little')
-        with patch('builtins.open', side_effect=[OSError(24, "Too many open files"),
-                                                 io.BytesIO(arm), io.BytesIO(x86)]):
-            self.assertIsNone(M.vibrance_host.native_python())
-            self.assertEqual(M.vibrance_host.native_python(), '/proc/self/root/usr/bin/python3')
-
-    def test_native_worker_is_killed_and_reaped_on_cancel(self):
-        worker = MagicMock()
-        worker.__enter__.return_value = worker
-        worker.poll.return_value = None
-        worker.communicate.side_effect = [subprocess.TimeoutExpired('python', .05), (b'', b'')]
-        with patch.object(M.vibrance_host, "native_python", return_value=sys.executable), patch.object(M.vibrance_lutfile, 'disabled', False), patch.object(M.vibrance_lutfile.subprocess, 'Popen', return_value=worker), patch.object(M.vibrance_host, "system_env", return_value={'PYTHONHOME': 'bad', 'PYTHONPATH': 'bad'}) as env:
-            cancelled = iter((False, False, True))
+    def test_a_cancel_or_unload_stops_the_native_worker(self):
+        with emulated_decky():
             with self.assertRaises(V.BuildCancelled):
-                M.vibrance_lutfile.generate(1.2, 33, 'pq', V.D65, lambda: next(cancelled))
-            worker.kill.assert_called_once()
-            self.assertEqual(worker.communicate.call_count, 2)
-            self.assertEqual(env.return_value, {})
+                M.vibrance_lutfile.generate(1.2, 33, 'pq', V.D65, lambda: True)
+            with patch.object(M.vibrance_lutfile, 'disabled', True), self.assertRaises(V.BuildCancelled):
+                M.vibrance_lutfile.generate(1.2, 33, 'pq', V.D65, lambda: False)
+            with patch.object(M.dk_process, "run_helper", side_effect=InterruptedError("cancelled")) as helper, \
+                    self.assertRaises(V.BuildCancelled):
+                M.vibrance_lutfile.generate(1.2, 33, 'pq', V.D65, lambda: False)
+            cancel = helper.call_args.args[2]
+            with patch.object(M.vibrance_lutfile, 'disabled', True):
+                self.assertTrue(cancel(), "an unload stops a running build too")
 
     def test_validation_and_worker_failure_reject_partial_output(self):
-        with patch.object(M.vibrance_host, "native_python", return_value=sys.executable), patch.object(M.vibrance_lutfile, 'disabled', False):
+        with emulated_decky():
             for saturation, size in ((True, 33), (1.2, True), (float('nan'), 33)):
                 with self.assertRaises(ValueError):
                     M.vibrance_lutfile.generate(saturation, size, 'pq', V.D65, lambda: False)
-            worker = MagicMock()
-            worker.__enter__.return_value = worker
-            worker.communicate.return_value = (b'partial', b'error')
-            worker.returncode = 1
-            worker.poll.return_value = 1
-            with patch.object(M.vibrance_lutfile.subprocess, 'Popen', return_value=worker):
-                with self.assertRaisesRegex(ValueError, 'worker failed'):
+            with patch.object(M.dk_process, "run_helper", return_value=(1, b'partial', b'Traceback: boom')):
+                with self.assertRaisesRegex(ValueError, 'worker failed: Traceback: boom'):
                     M.vibrance_lutfile.generate(1.2, 33, 'pq', V.D65, lambda: False)
+            with patch.object(M.dk_process, "run_helper", side_effect=TimeoutError):
+                with self.assertRaisesRegex(ValueError, "worker timed out"):
+                    M.vibrance_lutfile.generate(1.2, 33, "pq", V.D65, lambda: False)
+
+    def test_the_native_worker_runs_the_lut_script_with_a_deadline(self):
+        with emulated_decky(), patch.object(M.dk_process, "run_helper", return_value=(0, b"LUT\n", b"")) as helper:
+            self.assertEqual(M.vibrance_lutfile.generate(1.2, 33, "pq", V.D65, lambda: False), "LUT\n")
+        args, seconds = helper.call_args.args[:2]
+        self.assertEqual(os.path.basename(args[0]), "vibrance_lut.py")
+        self.assertEqual(args[1:], ["1.2", "33", "pq", repr(V.D65[0]), repr(V.D65[1])])
+        self.assertEqual(seconds, M.vibrance_lutfile.WORKER_S)
 
     def test_steamos_keeps_existing_generator_and_xprop_invocation(self):
-        with patch.object(M.vibrance_host, "native_python", return_value=None), patch.object(V, "generate", return_value="original") as generate, patch.object(M.vibrance_x11.subprocess, "run") as run:
+        with patch.object(M.dk_process, "emulated", return_value=False), \
+                patch.object(V, "generate", return_value="original") as generate, \
+                patch.object(M.vibrance_x11.subprocess, "run") as run:
             self.assertEqual(M.vibrance_lutfile.generate(1.2, 33, "pq", V.D65, lambda: False), "original")
             generate.assert_called_once()
             M.vibrance_x11.run_xprop(["xprop", "-root"], timeout=3)
-            run.assert_called_once_with(["xprop", "-root"], timeout=3)
+            self.assertEqual(run.call_args.args[0], ["xprop", "-root"])
+            self.assertNotIn("close_fds", run.call_args.kwargs)
 
     def test_arm_xprop_uses_absolute_host_binary_and_posix_spawn(self):
-        with patch.object(M.vibrance_host, "native_python", return_value="native"), patch.object(M.vibrance_x11.subprocess, "run") as run:
+        with patch.object(M.dk_process, "emulated", return_value=True), \
+                patch.object(M.vibrance_x11.subprocess, "run") as run:
             M.vibrance_x11.run_xprop(["xprop", "-root", "ATOM"], timeout=3)
-            run.assert_called_once_with(["/proc/self/root/usr/bin/xprop", "-root", "ATOM"], timeout=3, close_fds=False)
-
-    def test_native_worker_deadline_kills_and_reaps_instead_of_hanging(self):
-        worker = MagicMock()
-        worker.__enter__.return_value = worker
-        worker.poll.return_value = None
-        with patch.object(M.vibrance_host, "native_python", return_value=sys.executable), \
-                patch.object(M.vibrance_lutfile, "disabled", False), \
-                patch.object(M.vibrance_lutfile.subprocess, "Popen", return_value=worker), \
-                patch.object(M.time, "monotonic", side_effect=[0, 31]):
-            with self.assertRaisesRegex(ValueError, "worker timed out"):
-                M.vibrance_lutfile.generate(1.2, 33, "pq", V.D65, lambda: False)
-        worker.kill.assert_called_once()
-        worker.communicate.assert_called_once_with()
+        self.assertEqual(run.call_args.args[0], ["/proc/self/root/usr/bin/xprop", "-root", "ATOM"])
+        self.assertIs(run.call_args.kwargs["close_fds"], False)
+        self.assertEqual(run.call_args.kwargs["timeout"], 3)
 
 
 class CompletedSlots(PluginTest):
@@ -613,15 +596,3 @@ class LutFileWrites(PluginTest):
             self.assertTrue(self._write(os.path.join(folder, "hdr-look-0.cube")))
             self.assertEqual(sorted(os.listdir(folder)),
                              sorted(aged[2:] + [fresh, "hdr-look-0.cube"]))
-
-    def test_the_native_worker_runs_isolated(self):
-        worker = MagicMock()
-        worker.__enter__.return_value = worker
-        worker.poll.return_value = 0
-        worker.returncode = 0
-        worker.communicate.return_value = (b"LUT\n", b"")
-        with patch.object(M.vibrance_host, "native_python", return_value=sys.executable), \
-                patch.object(M.vibrance_lutfile, "disabled", False), \
-                patch.object(M.vibrance_lutfile.subprocess, "Popen", return_value=worker) as popen:
-            self.assertEqual(M.vibrance_lutfile.generate(1.2, 33, "pq", V.D65, lambda: False), "LUT\n")
-        self.assertEqual(popen.call_args[0][0][:2], [sys.executable, "-I"])

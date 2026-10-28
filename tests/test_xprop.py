@@ -11,8 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from _fixtures import PluginTest  # installs the loader stand-ins first
-import main as M
+from _fixtures import PluginTest  # installs the decky stand-in first
+import vibrance_control as M
 
 
 class AtomEncoding(PluginTest):
@@ -75,7 +75,7 @@ class AtomWrites(PluginTest):
     def setUp(self):
         self.run = patch.object(M.vibrance_x11.subprocess, "run").start()
         self.addCleanup(patch.stopall)
-        patch.object(M.vibrance_host, "native_python", return_value=None).start()
+        patch.object(M.vibrance_x11.dk_process, "emulated", return_value=False).start()
         M.vibrance_x11.DISPLAY = ":7"
 
     def test_the_sdr_float_goes_out_as_a_32_bit_cardinal(self):
@@ -207,7 +207,7 @@ class DisplayChoice(PluginTest):
     def test_a_repeated_search_logs_only_what_changed(self):
         """Without gamescope (Desktop Mode) the search repeats for hours."""
         self._serve({})
-        with patch.object(M.decky.logger, "info") as info:
+        with patch.object(M.vibrance_state.logger, "info") as info:
             for _ in range(3):
                 self.assertIsNone(M._pick_display())
             self._serve({":0": self.PRIMARY})
@@ -309,8 +309,9 @@ class X11Edges(PluginTest):
 
     def test_system_tools_get_a_path_when_the_loader_gives_none(self):
         with patch.dict(os.environ, {"LD_PRELOAD": "x"}, clear=True):
-            env = M.vibrance_host.system_env()
+            env = M.vibrance_x11.system_env()
         self.assertEqual(env["PATH"], "/usr/bin:/bin:/usr/sbin:/sbin")
+        self.assertEqual(env["LC_ALL"], "C.UTF-8", "xprop's own messages stay English")
         self.assertNotIn("LD_PRELOAD", env)
 
 
@@ -346,7 +347,7 @@ class XpropReads(PluginTest):
                                 side_effect=lambda cmd, **kw: SimpleNamespace(
                                     stdout=self.outputs.get(cmd[-1], ""))).start()
         self.addCleanup(patch.stopall)
-        patch.object(M.vibrance_host, "native_python", return_value=None).start()
+        patch.object(M.vibrance_x11.dk_process, "emulated", return_value=False).start()
 
     def test_a_root_read_captures_text_from_the_server_asked_for(self):
         self.outputs["-root"] = "GAMESCOPE_PID(CARDINAL) = 1\n"

@@ -14,11 +14,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from _fixtures import PluginCase, PluginTest, drain, edid_with_red, root_dump  # installs the loader stand-ins first
-import main as M
+from _fixtures import PluginCase, PluginTest, drain, edid_with_red, root_dump, write_settings  # installs the decky stand-in first
+import vibrance_control as M
 import vibrance_edid
 import vibrance_lut as V
-import _harness
+import _fixtures
 
 
 def edid_cta(*masks):
@@ -28,7 +28,7 @@ def edid_cta(*masks):
     block[:3] = bytes((2, 3, 4 + len(masks) * 4))
     for n, mask in enumerate(masks):
         block[4 + n * 4:8 + n * 4] = bytes((0xe3, 6, mask, 1))
-    return _harness.valid_edid(base + block)
+    return _fixtures.valid_edid(base + block)
 
 
 class PanelDetection(PluginTest):
@@ -43,7 +43,7 @@ class PanelDetection(PluginTest):
     def test_an_edid_without_colorimetry_is_read_as_rec709_like_gamescope(self):
         """gamescope assumes Rec.709 when red x is zero, which fails the wide
         test; keeping the wide default would make 100% the harshest setting."""
-        blank = _harness.valid_edid(bytearray(128))
+        blank = _fixtures.valid_edid(bytearray(128))
         self.assertEqual(vibrance_edid.red_primary(blank), vibrance_edid.REC709_RED)
         self.assertIs(M.vibrance_panel.panel_is_wide_gamut(blank), False)
         self.assertEqual(vibrance_edid.white_point(blank), M.vibrance_lut.D65)
@@ -60,7 +60,7 @@ class PanelDetection(PluginTest):
         self.assertIs(M.vibrance_panel.panel_is_wide_gamut(edid_with_red(0.700, 0.400)), False)
         blob = bytearray(edid_with_red(0.640, 0.330))
         blob[0x21], blob[0x22] = 0x99, 0x80     # white x + y above 1
-        self.assertEqual(vibrance_edid.white_point(_harness.valid_edid(blob)), V.D65)
+        self.assertEqual(vibrance_edid.white_point(_fixtures.valid_edid(blob)), V.D65)
         self.assertFalse(vibrance_edid.valid(edid_with_red(0.640, 0.330) + b"\0"))
 
     def test_thresholds_match_gamescope(self):
@@ -82,7 +82,7 @@ class HdrCapability(PluginTest):
         base = bytearray(128)
         base[126] = 1 if cta else 0
         if not cta:
-            return _harness.valid_edid(base)
+            return _fixtures.valid_edid(base)
         block = bytearray(128)
         block[0] = 0x02                      # CTA-861
         block[1] = 3                          # revision
@@ -93,7 +93,7 @@ class HdrCapability(PluginTest):
             block[pos + 1:pos + 1 + len(payload)] = payload
             pos += 1 + len(payload)
         block[2] = pos                        # detailed timings start here
-        return _harness.valid_edid(base + block)
+        return _fixtures.valid_edid(base + block)
 
     def test_a_panel_advertising_st2084(self):
         # Traditional gamma SDR + SMPTE ST 2084, as the Legion Go 2 reports.
@@ -114,7 +114,7 @@ class HdrCapability(PluginTest):
         and saving it off is worse than showing one that does nothing."""
         blob = bytearray(self._edid(0b0000_0101))
         blob[128 + 2] = 0
-        self.assertTrue(vibrance_edid.supports_pq(_harness.valid_edid(blob)))
+        self.assertTrue(vibrance_edid.supports_pq(_fixtures.valid_edid(blob)))
 
     def test_a_base_only_edid_is_a_definite_no(self):
         """HDR metadata has nowhere else to live, so a complete EDID without it
@@ -128,7 +128,7 @@ class HdrCapability(PluginTest):
         base[126] = 1
         displayid = bytearray(128)
         displayid[0] = 0x70
-        self.assertFalse(vibrance_edid.supports_pq(_harness.valid_edid(base + displayid)))
+        self.assertFalse(vibrance_edid.supports_pq(_fixtures.valid_edid(base + displayid)))
 
     def test_pq_declared_inside_a_displayid_block_is_found(self):
         """CTA data blocks can be carried inside DisplayID, so looking only for
@@ -142,7 +142,7 @@ class HdrCapability(PluginTest):
         displayid[5] = 0x81                           # CTA-861 data block
         displayid[7] = len(cta_payload)
         displayid[8:8 + len(cta_payload)] = cta_payload
-        self.assertTrue(vibrance_edid.supports_pq(_harness.valid_edid(base + displayid)))
+        self.assertTrue(vibrance_edid.supports_pq(_fixtures.valid_edid(base + displayid)))
 
     def test_a_truncated_edid_is_not_an_answer(self):
         self.assertIsNone(vibrance_edid.supports_pq(b"\x00" * 64))
@@ -151,7 +151,7 @@ class HdrCapability(PluginTest):
         edid = bytearray(self._edid(0b0000_0101))
         edid[128 + 2] = 127                   # collection runs to the very end
         # The HDR block inside the collection still answers; the checksum does not.
-        self.assertIs(vibrance_edid.supports_pq(_harness.valid_edid(edid)), True)
+        self.assertIs(vibrance_edid.supports_pq(_fixtures.valid_edid(edid)), True)
 
 
 class Edid(PluginTest):
@@ -167,7 +167,7 @@ class Edid(PluginTest):
         blob = bytearray(edid_cta(1))
         blob[126] = 2
         blob.extend(edid_cta(4)[128:])
-        self.assertIs(vibrance_edid.supports_pq(_harness.valid_edid(blob)), True)
+        self.assertIs(vibrance_edid.supports_pq(_fixtures.valid_edid(blob)), True)
 
     def test_invalid_header_checksum_and_truncated_blocks_are_unknown(self):
         valid = edid_cta(4)
@@ -178,13 +178,13 @@ class Edid(PluginTest):
         self.assertIsNone(vibrance_edid.red_primary(bytes(29)))
         truncated = bytearray(valid)
         truncated[130] = 6
-        self.assertIsNone(vibrance_edid.supports_pq(_harness.valid_edid(truncated)))
+        self.assertIsNone(vibrance_edid.supports_pq(_fixtures.valid_edid(truncated)))
 
     def test_malformed_cta_extensions_are_unknown(self):
         short_end = bytearray(edid_cta(4))
         short_end[130] = 3                       # data blocks would end before they start
         # A too-short HDR block is skipped like the kernel does (tests/test_edid.py).
-        self.assertIsNone(vibrance_edid.supports_pq(_harness.valid_edid(short_end)))
+        self.assertIsNone(vibrance_edid.supports_pq(_fixtures.valid_edid(short_end)))
 
     def test_a_new_white_point_alone_counts_as_a_change(self):
         """The SDR look is built for the panel's white, so it has to be rebuilt."""
@@ -192,7 +192,7 @@ class Edid(PluginTest):
             blob = bytearray(edid_with_red(0.640, 0.330))
             blob[0x21], blob[0x22] = x >> 2, y >> 2
             blob[0x1A] = ((x & 3) << 2) | (y & 3)
-            return _harness.valid_edid(blob)
+            return _fixtures.valid_edid(blob)
         M.vibrance_panel.configure_for_panel((None, ("edid", "/edid/a", None), edid(303, 314)))
         self.assertTrue(M.vibrance_panel.configure_for_panel((None, ("edid", "/edid/b", None), edid(320, 336))))
 
@@ -201,7 +201,7 @@ class Edid(PluginTest):
         x, y = 303, 314
         blob[0x21], blob[0x22] = x >> 2, y >> 2
         blob[0x1A] = ((x & 3) << 2) | (y & 3)
-        M.vibrance_panel.configure_for_panel((None, ("edid", "/edid/x", None), _harness.valid_edid(blob)))
+        M.vibrance_panel.configure_for_panel((None, ("edid", "/edid/x", None), _fixtures.valid_edid(blob)))
         self.assertEqual(M.state.sdr_white_point, (x / 1024, y / 1024))
 
     def test_displayid_scans_all_embedded_cta_collections(self):
@@ -209,7 +209,7 @@ class Edid(PluginTest):
         base[126] = 1
         extension[0], extension[2] = 0x70, 14
         extension[5:19] = bytes((0x81, 0, 4, 0xe3, 6, 1, 1, 0x81, 0, 4, 0xe3, 6, 4, 1))
-        self.assertIs(vibrance_edid.supports_pq(_harness.valid_edid(base + extension)), True)
+        self.assertIs(vibrance_edid.supports_pq(_fixtures.valid_edid(base + extension)), True)
 
     def test_without_gamescope_s_edid_path_the_kernel_s_panel_edid_is_read(self):
         """gamescope only publishes the path when its session patches the EDID."""
@@ -246,7 +246,7 @@ class Edid(PluginTest):
         blob = bytearray(edid_cta(4))
         red = edid_with_red(0.6836, 0.3154)
         blob[0x19:0x1d] = red[0x19:0x1d]
-        blob = _harness.valid_edid(blob)
+        blob = _fixtures.valid_edid(blob)
         with patch.object(M.state, "panel_cache_key", None), patch.object(M.state, "panel_cache_complete", False), \
                 patch.object(M.vibrance_x11, "read_root_properties", side_effect=[
                     root_dump(False, "/edid/one"), root_dump(False, "/edid/one"), root_dump(False, "/edid/two")]), \
@@ -273,11 +273,10 @@ class MetadataFiles(PluginTest):
             code = """import sys,os
 sys.path.insert(0, 'tests')
 import _harness
-_harness.install()
-import main
+import vibrance_host
 before=len(os.listdir('/proc/self/fd'))
 for _ in range(20):
- assert main.vibrance_host.read_edid(sys.argv[1]) is None
+ assert vibrance_host.read_edid(sys.argv[1]) is None
 assert len(os.listdir('/proc/self/fd'))==before
 """
             try:
@@ -374,9 +373,9 @@ class SdrColorimetry(PluginTest):
         x, y = 303, 314
         blob[0x21], blob[0x22] = x >> 2, y >> 2
         blob[0x1A] = ((x & 3) << 2) | (y & 3)
-        self.assertEqual(vibrance_edid.white_point(_harness.valid_edid(blob)), (x/1024, y/1024))
+        self.assertEqual(vibrance_edid.white_point(_fixtures.valid_edid(blob)), (x/1024, y/1024))
         blob[0x1B] = blob[0x19] = 0             # no colorimetry: gamescope's Rec.709 has D65
-        self.assertEqual(vibrance_edid.white_point(_harness.valid_edid(blob)), V.D65)
+        self.assertEqual(vibrance_edid.white_point(_fixtures.valid_edid(blob)), V.D65)
         for invalid in (None, b"", bytes(128)):
             self.assertEqual(vibrance_edid.white_point(invalid), V.D65)
 
@@ -395,22 +394,22 @@ class CapabilityGating(PluginTest):
         sleep = patch.object(asyncio, "sleep", no_wait)
         sleep.start()
         self.addCleanup(sleep.stop)
-        self.addCleanup(M.settings._store.clear)  # not under StateGuard
+        self.addCleanup(write_settings, None)  # the file is not under StateGuard
 
     def _boot(self, wide, pq, hdr_on=True):
         M.vibrance_panel.panel_is_wide_gamut = lambda *_args: wide
         M.vibrance_panel.panel_supports_hdr = lambda *_args: pq
         # _main reloads these from the settings, so seeding the state is not
         # enough to get an enabled half into the startup path.
-        M.settings._store.update({"sdr_enabled": False, "hdr_enabled": hdr_on})
+        write_settings({"sdr_enabled": False, "hdr_enabled": hdr_on})
         # A freshly loaded module: unknowns keep these startup defaults.
         M.state.public.update({"hdr_supported": True, "sdr_max": M.SDR_MAX_WIDE,
                                 "sdr_soft_limit": M.vibrance_state.SDR_SOFT_WIDE})
         M.state.sdr_neutral_atom, M.state.sdr_atom_span = 1.0, 2.0
         # _main only loads settings now; the part that reads the panel waits in
         # a task, so it is driven explicitly here.
-        drain(M.Plugin()._main())
-        drain(M.Plugin()._start_when_ready())
+        drain(M.Controller()._main())
+        drain(M.Controller()._start_when_ready())
 
     def test_a_panel_without_pq_loses_the_hdr_half_only(self):
         self._boot(wide=True, pq=False)
@@ -474,7 +473,7 @@ class CapabilityGating(PluginTest):
         self.assertFalse(complete, "an EDID that turns up later must still be read")
 
     def test_an_empty_edid_maps_like_one_without_colorimetry(self):
-        no_colorimetry = _harness.valid_edid(bytearray(128))
+        no_colorimetry = _fixtures.valid_edid(bytearray(128))
         self.assertEqual(self._from_startup_defaults(b"")[0],
                          self._from_startup_defaults(no_colorimetry)[0])
 
@@ -509,7 +508,7 @@ class CapabilityGating(PluginTest):
         """The frontend hides the section, but the callable stays reachable."""
         M.state.public.update({"hdr_supported": False, "hdr_enabled": False})
         M.state.settings_loaded = True
-        state = drain(M.Plugin().set_hdr_enabled(True))
+        state = drain(M.Controller().set_hdr_enabled(True))
         self.assertFalse(state["hdr_enabled"])
 
 
@@ -576,9 +575,9 @@ class ExternalDisplay(PluginTest):
                                    "sdr_enabled": False, "hdr_enabled": False,
                                    "hdr_supported": True})
         self.assertFalse(
-            drain(M.Plugin().set_sdr_enabled(True))["sdr_enabled"])
+            drain(M.Controller().set_sdr_enabled(True))["sdr_enabled"])
         self.assertFalse(
-            drain(M.Plugin().set_hdr_enabled(True))["hdr_enabled"])
+            drain(M.Controller().set_hdr_enabled(True))["hdr_enabled"])
 
 
 class StartupOnExternalDisplay(PluginTest):
@@ -603,9 +602,9 @@ class StartupOnExternalDisplay(PluginTest):
         M.vibrance_panel.panel_supports_hdr = lambda *_args: self.fail(
             "external panel must not be measured")
         M.vibrance_effects.apply_sdr = staticmethod(lambda: calls.append("apply SDR"))
-        M.Plugin._schedule_look = lambda self, component: calls.append(
+        M.Controller._schedule_look = lambda self, component: calls.append(
             f"schedule {component.upper()}")
-        M.Plugin._track = staticmethod(lambda task: task.cancel())
+        M.Controller._track = staticmethod(lambda task: task.cancel())
         M.state.mutation_lock = asyncio.Lock()
         M.state.panel_cache_key = None
         M.state.panel_cache_complete = False
@@ -616,7 +615,7 @@ class StartupOnExternalDisplay(PluginTest):
             "hdr_supported": True,
         })
         with patch.object(asyncio, "sleep", no_wait):
-            asyncio.run(M.Plugin()._start_when_ready())
+            asyncio.run(M.Controller()._start_when_ready())
         self.assertEqual(calls, [])
 
 
@@ -783,7 +782,7 @@ class KernelEdidEdges(PluginTest):
             x, y = white
             blob[0x21], blob[0x22] = x >> 2, y >> 2
             blob[0x1A] = ((x & 3) << 2) | (y & 3)
-            return _harness.valid_edid(blob)
+            return _fixtures.valid_edid(blob)
         # gamescope takes colorimetry for any red x other than zero, even 1/1024.
         self.assertEqual(vibrance_edid.white_point(edid(1, (303, 314))), (303 / 1024, 314 / 1024))
         # A white the LUT maths would refuse falls back to D65 instead of failing every build.
@@ -901,7 +900,7 @@ class PanelShapeChanges(PluginTest):
 def _with_extension(block):
     base = bytearray(128)
     base[126] = 1
-    return _harness.valid_edid(base + bytes(block))
+    return _fixtures.valid_edid(base + bytes(block))
 
 
 def _displayid(*blocks, payload=None):
@@ -1000,8 +999,8 @@ class HdrSwitchedOffForAPanelWithoutPq(PluginCase):
         await self.plugin._start_when_ready(start_monitor=False)
         await self.drain()
         self.assertFalse(M.state.public["hdr_enabled"])
-        M.Plugin._save.assert_called()
-        self.assertFalse(M.Plugin._save.call_args.args[0]["hdr_enabled"])
+        M.Controller._save.assert_called()
+        self.assertFalse(M.Controller._save.call_args.args[0]["hdr_enabled"])
 
 
 class MappingSwitchesBack(PluginTest):

@@ -4,8 +4,8 @@
 
 """CTA-861 data blocks read the way the kernel reads them."""
 
-from _fixtures import PluginTest  # installs the loader stand-ins first
-import _harness
+from _fixtures import PluginTest  # installs the decky stand-in first
+import _fixtures
 import vibrance_edid
 
 HDR_PQ = bytes((0xe3, 0x06, 0x05, 0x01))          # extended tag 6, SDR + ST 2084
@@ -20,7 +20,7 @@ def edid(*extensions, revision=3):
         ext[:3] = bytes((0x02, revision, 4 + len(body)))
         ext[4:4 + len(body)] = body
         blob += ext
-    return _harness.valid_edid(blob)
+    return _fixtures.valid_edid(blob)
 
 
 class ShortHdrMetadata(PluginTest):
@@ -44,11 +44,11 @@ class CtaRevision(PluginTest):
     def test_an_old_revision_is_skipped_whatever_its_offsets_say(self):
         blob = bytearray(edid(HDR_PQ, revision=1))
         blob[128 + 2] = 2                                # out of range for a data block collection
-        self.assertIs(vibrance_edid.supports_pq(_harness.valid_edid(blob)), False)
+        self.assertIs(vibrance_edid.supports_pq(_fixtures.valid_edid(blob)), False)
 
     def test_an_old_revision_does_not_hide_a_later_extension(self):
         old = bytearray(edid(HDR_PQ, HDR_PQ))
         old[128 + 1] = 1
-        self.assertIs(vibrance_edid.supports_pq(_harness.valid_edid(old)), True)
+        self.assertIs(vibrance_edid.supports_pq(_fixtures.valid_edid(old)), True)
         old[256 + 1] = 1
-        self.assertIs(vibrance_edid.supports_pq(_harness.valid_edid(old)), False)
+        self.assertIs(vibrance_edid.supports_pq(_fixtures.valid_edid(old)), False)

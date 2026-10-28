@@ -11,7 +11,7 @@
 **Adjust SDR and HDR saturation from the Steam overlay.**
 Use separate controls for the Steam interface and ordinary games, and for games already running in HDR.
 
-[Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Quick start](#usage) · [Technical details](#how-it-works) · [Troubleshooting](#troubleshooting)
+[Features](#features) · [Requirements](#requirements) · [Installation](#installation) · [Quick start](#usage) · [Technical details](#how-it-works) · [Troubleshooting](#troubleshooting) · [AI disclaimer](#ai-disclaimer)
 
 </div>
 
@@ -231,10 +231,13 @@ native system Python and `xprop` where supported. Ordinary x86-64 SteamOS keeps 
 existing path. This changes execution overhead, not LUT resolution or colour maths.
 
 Settings live in Decky's settings directory, outside the installed plugin folder.
-Startup validates them before accepting edits; a failed read keeps the file intact,
-and unparseable content is set aside rather than deleted.
-The frontend keeps one outstanding read and one write at a time, coalesces unsent
-slider edits, and sends any switch or reset ahead of older unsent slider changes.
+Startup validates them before accepting edits; a failed read keeps the file intact.
+Every save also refreshes a last good copy (`settings.json.last-good`): damaged
+content is kept beside the file (`settings.json.corrupt-*`, never deleted) and the
+last good copy, or the defaults without one, is used instead.
+The frontend keeps one outstanding read and one write at a time, in the order you
+made them; a newer slider value replaces an unsent one, and a switch or reset
+replaces the unsent slider changes it makes pointless.
 
 </details>
 
@@ -243,34 +246,38 @@ slider edits, and sends any switch or reset ahead of older unsent slider changes
 <details>
 <summary><b>Build, test and package from source</b></summary>
 
-Use Node.js **22** (the CI version), Python **3.10+** for backend tests, and a ZIP
-tool: `zip` on Linux/macOS or 7-Zip on Windows. The commands and `npm run
-verify:package` call `python`; where only `python3` exists, install the
-`python-is-python3` package (a shell alias is not enough for npm scripts).
+Use Node.js **24** (the CI version; 22 or newer works) and Python **3.10+**. The npm scripts call
+`python`; where only `python3` exists, install the `python-is-python3` package
+(a shell alias is not enough for npm scripts).
 
 ```bash
 git clone https://github.com/Rayekkk/DeckyVibranceHDR
 cd DeckyVibranceHDR
 npm ci
-npm run typecheck
-npm test
-python -W error -m unittest discover -s tests -v
-npm run package
-npm run verify:package
+npm run check
 npm audit --audit-level=low
 ```
 
-**Package rebuilds the frontend** and creates `DeckyVibranceHDR-<version>.zip`.
-Install that ZIP through Decky. The package includes the bundled `@decky/api`
-source, license and source map; React and `@decky/ui` come from the Decky host.
-See [NOTICE](NOTICE) for component provenance.
+`npm run check` runs the type check, the backend tests (`python -W error`), the
+panel tests (`node --test "tests/*.test.cjs"`), the build with its bundle check and
+the package. **The package** is `artifacts/DeckyVibranceHDR-<version>.zip` with its
+`.sha256`: the same files always give the same ZIP, and it is read back the way an
+updater reads it and compared byte for byte with the sources before it is kept.
+Install that ZIP through Decky. It includes the bundled `@decky/api` source, licence
+and source map; React and `@decky/ui` come from the Decky host. See [NOTICE](NOTICE)
+for component provenance. POSIX-specific tests skip on Windows; run the backend tests
+on Linux (or WSL) too.
 
 **Code layout.** Only `main.py` imports Decky's modules; the rest can be tested
-without the loader.
+without the loader. Files named `dk_*`, `src/result.ts`, `src/writeQueue.ts`,
+`scripts/package.mjs`, `scripts/check-build.mjs`, `rollup.config.js`,
+`.github/workflows/checks.yml` and the matching files in `tests/` are shared with
+the author's other Decky plugins and kept identical across them.
 
 | File | Role |
 |---|---|
-| `main.py` | Decky entry point: controls, scheduling, startup, monitoring and recovery |
+| `main.py` | Decky entry point: answers the panel's calls and hands the work on |
+| `vibrance_control.py` | Controls, scheduling, startup, monitoring and recovery |
 | `vibrance_state.py` | What the plugin remembers while it runs, and the slider ranges |
 | `vibrance_effects.py` | The SDR atom and the looks: applying them and restoring what was there |
 | `vibrance_panel.py` | Which panel is driven: gamut, HDR support, the SDR mapping, docking |
@@ -278,36 +285,35 @@ without the loader.
 | `vibrance_edid.py` | EDID parsing: red and white points, HDR/PQ support |
 | `vibrance_lut.py` | The colour maths and `.cube` text |
 | `vibrance_lutfile.py` | Building LUTs (natively under FEX) and writing them atomically |
-| `vibrance_settings.py` | Reading `settings.json`, setting a broken one aside, atomic saves |
-| `vibrance_host.py` | Host environment, emulation check, file identity, the kernel's panel EDID |
-| `lego_updater.py` | Release checks and downloads |
-| `src/index.tsx`, `src/stateSync.ts` | The panel, and request ordering between it and the backend |
+| `vibrance_settings.py` | `settings.json`: keys the plugin does not know survive a save |
+| `vibrance_host.py` | File identity, the kernel's panel EDID |
+| `dk_update.py` | Release checks and downloads (`lego_updater.py` is only kept for older versions' updaters) |
+| `dk_fs.py`, `dk_process.py`, `dk_net.py`, `dk_rpc.py` | Safe file writes, running programs (natively under FEX), HTTPS, the call contract |
+| `src/index.tsx`, `src/updates.tsx` | The panel and its Updates section |
+| `src/writeQueue.ts` | Request ordering between the panel and the backend |
 
-`verify:package` refuses a ZIP built while files that ship in it have uncommitted
-changes, so a release always matches a commit. Set `DVH_ALLOW_DIRTY=1` for a local
-trial build.
-
-GitHub Actions uses Linux, Python 3.13 (plus 3.10 and 3.11 for the backend) and
-Node.js 22 for backend/frontend tests, version checks (including tag against
-`plugin.json` on tag builds), dependency audit, typecheck, build and ZIP
-verification. It uploads a build artifact; it does not publish a release.
-POSIX-specific tests skip on Windows.
+GitHub Actions runs the backend tests on Linux (Python 3.10, 3.11 and 3.14) and
+Windows, then the type check, dependency audit, panel tests, build and package with
+Node.js 24. On a tag build the package fails unless the tag, `plugin.json`,
+`package.json`, the lockfile and the newest CHANGELOG release agree. It uploads the
+ZIP as a build artifact; it does not publish a release.
 
 **Releasing.** The in-plugin updater looks only at the latest published GitHub
-release and needs an asset named exactly `DeckyVibranceHDR-<version>.zip`. It never
-falls back to an older release: until the asset is attached, users see "Release has
-no installable ... asset yet".
+release and needs exactly one asset named `DeckyVibranceHDR-<version>.zip`, whose
+size and SHA-256 GitHub reports. It never falls back to an older release. Versions
+1.0.0 to 1.2.0 also require `lego_updater.py` in that ZIP, so it stays in the package.
 
 1. Run `npm version <version> --no-git-tag-version` (it updates `package.json` and
    `package-lock.json`), set the same version in `plugin.json`, date the CHANGELOG
    entry and, after a device pass, update the device-checked version named in
    [Requirements](#requirements) and [Validation and device limits](#validation-and-device-limits).
-2. Commit, then run `npm run package` and `npm run verify:package` on that commit.
+2. Commit, then run `npm run check` and `node scripts/package.mjs --release` on that
+   commit: `--release` refuses a ZIP while anything that ships or builds it has
+   uncommitted changes, so a release always matches a commit.
 3. Tag the commit `<version>` (for example `1.2.0`) and push the tag; CI fails the
-   tag build if it differs from `plugin.json` or the newest CHANGELOG heading. A tag such as `v1.2.0` does not match
-   CI's tag filter, so it gets no check at all.
+   tag build if it differs from `plugin.json` or the newest CHANGELOG heading.
 4. Publish a GitHub release for the tag - not a draft or prerelease - and attach the
-   ZIP you verified in step 2 (the CI artifact is wrapped in a second ZIP).
+   ZIP from `artifacts/` you built in step 2 (the CI artifact is wrapped in a second ZIP).
 
 To measure LUT generation locally, use `python scripts/benchmark_lut.py`.
 
@@ -345,10 +351,28 @@ restarts. Earlier report versions, hashes and timings are historical.
 BSD 3-Clause — see [LICENSE](LICENSE). Third-party components, including the bundled
 LGPL-2.1 `@decky/api`, are listed in [NOTICE](NOTICE).
 
----
+## AI disclaimer
 
-<div align="left">
+This project was built with substantial help from AI coding assistants. Most of the code,
+tests and documentation were written by AI agents (Anthropic's Claude Code) working under my
+direction: I defined what each feature should do, made the design and safety decisions,
+reviewed the results and chose what was released.
 
-*Vibe coded with the help of [Claude](https://claude.ai) 🤖*
+The AI was used to:
 
-</div>
+- write the Python backend, the colour maths and the Decky panel;
+- build the automated test suites (about 570 tests run on Linux and Windows for every change);
+- audit the code for bugs, security issues and wasted work, with every finding checked by
+  independent review passes and, where possible, reproduced before it was fixed;
+- research how gamescope maps SDR colours and applies colour tables (its source code and the
+  panels' EDID) and write this documentation.
+
+Nothing here is untested AI output. I tested the plugin on my Legion Go 2 and Odin 3: SDR and
+HDR on wide- and standard-gamut panels, across Decky restarts, sleep and wake, and Desktop Mode
+and back, reading back what reached gamescope after each step. Features
+were held back until they behaved correctly on the real device, and calibration only from the
+built-in panel's own EDID, with nothing applied to an external display, was kept as a hard
+requirement.
+
+Even so, this plugin changes how gamescope draws colours on your screen. It is provided as is,
+without warranty (see [License](#license)); use it at your own risk.

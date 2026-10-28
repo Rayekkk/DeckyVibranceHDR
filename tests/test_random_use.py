@@ -7,8 +7,8 @@
 import asyncio
 import random
 
-from _fixtures import PluginCase  # installs the loader stand-ins first
-import main as M
+from _fixtures import PluginCase  # installs the decky stand-in first
+import vibrance_control as M
 
 PQ, G22 = M.vibrance_x11.ATOM_LOOK_PQ, M.vibrance_x11.ATOM_LOOK_G22
 

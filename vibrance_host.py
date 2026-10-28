@@ -5,61 +5,13 @@
 """What the plugin needs to know about the machine it runs on.
 
 Nothing here imports `decky`, so the module can be exercised by the test
-suites without the loader present.
+suites without the loader present. Running programs (and the host's native
+ones when Decky is emulated) is dk_process's job.
 """
 
-import functools
 import os
 import stat
-import sys
 import time
-
-# The host's own interpreter, reached past the emulator's view of the root.
-NATIVE_PYTHON = "/proc/self/root/usr/bin/python3"
-
-# Steam exports LD_LIBRARY_PATH pointing at its own bundled libraries and the
-# plugin inherits it, so a system binary spawned from here can load Steam's copy
-# of libreadline or libc and die on a missing symbol. Everything we spawn is a
-# system tool, so the loader variables go.
-LOADER_VARS = ("LD_LIBRARY_PATH", "LD_PRELOAD", "LD_AUDIT")
-
-
-def system_env(**extra) -> dict:
-    """The environment for a system tool, without Steam's loader variables."""
-    env = {k: v for k, v in os.environ.items() if k not in LOADER_VARS}
-    env.setdefault("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
-    env.update(extra)
-    return env
-
-
-@functools.cache
-def interpreter_headers():
-    """The ELF headers of the host Python and of the one running us.
-
-    They cannot change while the plugin runs. An OSError is raised, not
-    returned, so functools.cache keeps only a successful read and a passing
-    error (too many open files, say) is retried on the next call.
-    """
-    with open(NATIVE_PYTHON, "rb") as f:
-        native = f.read(20)
-    with open(sys.executable, "rb") as f:
-        loader = f.read(20)
-    return native, loader
-
-
-def native_python():
-    """The host's ARM Python when Decky's frozen interpreter runs under x86
-    emulation (Armada's FEX), else None."""
-    try:
-        native, loader = interpreter_headers()
-    except OSError:
-        return None
-    if (native[:5] == b"\x7fELF\x02" and native[5] == 1
-            and int.from_bytes(native[18:20], "little") == 183
-            and loader[:5] == b"\x7fELF\x02" and loader[5] == 1
-            and int.from_bytes(loader[18:20], "little") == 62):
-        return NATIVE_PYTHON
-    return None
 
 
 def file_identity(path):

@@ -14,6 +14,7 @@ import re
 import struct
 import subprocess
 
+import dk_process
 import vibrance_host
 
 ATOM_SDR_WIDENESS = "GAMESCOPE_COLOR_SDR_GAMUT_WIDENESS"
@@ -44,16 +45,16 @@ _deferred = 0
 
 
 def system_env(**extra) -> dict:
-    return vibrance_host.system_env(**{"DISPLAY": DISPLAY, **extra})
+    return dk_process.system_env(**{"DISPLAY": DISPLAY, "LC_ALL": "C.UTF-8", **extra})
 
 
 def run_xprop(command, **kwargs):
-    if vibrance_host.native_python() is not None:
-        # Absolute host path plus inheritable-FD policy enables posix_spawn,
-        # avoiding a fork of the large emulated Decky process on every atom.
-        command = ["/proc/self/root/usr/bin/xprop", *command[1:]]
+    if dk_process.emulated():
+        # The host's own xprop, through posix_spawn: no fork of the large
+        # emulated Decky process on every atom.
+        command = [dk_process.host_path("/usr/bin/xprop"), *command[1:]]
         kwargs["close_fds"] = False
-    return subprocess.run(command, **kwargs)
+    return dk_process.run(command, **kwargs)
 
 
 def float_to_cardinal(value: float) -> int:

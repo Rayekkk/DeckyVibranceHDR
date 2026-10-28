@@ -4,36 +4,64 @@
 
 """Fixtures shared by the topic suites.
 
-Importing this installs the loader stand-ins from _harness, so main.py can be
-imported next. PluginCase gives each test a fresh Plugin whose gamescope reads,
-writes and LUT builds are all faked in memory.
+Importing this installs DeckyKit's `decky` stand-in (_harness), so the
+plugin's modules can be imported next. PluginCase gives each test a fresh
+Controller whose gamescope reads, writes and LUT builds are all faked in memory.
 """
 
 import asyncio
 import os
 import sys
-import tempfile
 import unittest
+from contextlib import contextmanager
 from unittest.mock import patch
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-import _harness  # noqa: E402
-_harness.install()
+import _harness  # noqa: F401  (the decky stand-in, before anything imports it)
+import decky
+import vibrance_control as M  # noqa: E402
 
-import main as M  # noqa: E402
+M.vibrance_state.logger = decky.logger  # what main.py does; a real logging.Logger, so assertLogs works
+M.settings_path = os.path.join(decky.DECKY_PLUGIN_SETTINGS_DIR, "settings.json")
+M.vibrance_effects.settings_dir = decky.DECKY_PLUGIN_SETTINGS_DIR
+os.makedirs(decky.DECKY_PLUGIN_SETTINGS_DIR, exist_ok=True)
 
 # Never the machine's own panel: a laptop running the suite has an eDP EDID.
 M.vibrance_host.DRM_SYSFS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-such-drm")
-# Nor a real Downloads folder: an updater test that loses its stand-in user
-# would otherwise write into the host's /home/deck/Downloads.
-import lego_updater  # noqa: E402
-lego_updater.FALLBACK_DOWNLOADS = os.path.join(tempfile.gettempdir(), "dvh-tests-no-such-downloads")
 # Nor its X servers: a desktop session's sockets would answer real xprop calls.
 M.vibrance_x11.SOCKET_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "no-such-x11")
 
+
+def valid_edid(blob):
+    """Seal a complete synthetic EDID with its header and per-block checksums."""
+    blob = bytearray(blob)
+    blob[:8] = b"\x00\xff\xff\xff\xff\xff\xff\x00"
+    for pos in range(0, len(blob), 128):
+        blob[pos + 127] = (-sum(blob[pos:pos + 127])) & 255
+    return bytes(blob)
+
+
+@contextmanager
+def emulated_decky():
+    """Decky as under FEX on an ARM handheld: the "host's native" Python is this test's own."""
+    with patch.object(M.dk_process, "emulated", return_value=True), \
+            patch.object(M.dk_process, "host_path", side_effect=lambda path: path), \
+            patch.object(M.dk_process, "PYTHON", sys.executable), \
+            patch.object(M.vibrance_lutfile, "disabled", False):
+        yield
+
+
+def write_settings(values):
+    """settings.json as a previous run left it (None: no file at all)."""
+    for name in os.listdir(os.path.dirname(M.settings_path)):
+        if name.startswith("settings.json"):
+            os.remove(os.path.join(os.path.dirname(M.settings_path), name))
+    if values is not None:
+        M.vibrance_settings.dk_fs.write_json(M.settings_path, values)
+
+
 # Unpatched originals, captured at import before any test replaces them.
 READ_STRING_ATOM = M.vibrance_x11.read_string_atom
-SAVE_SETTINGS = M.Plugin._save
+SAVE_SETTINGS = M.Controller._save
 PATH_EXISTS = M.os.path.exists
 WRITE_LOOK = M.vibrance_effects.write_look
 
@@ -68,7 +96,7 @@ def edid_with_red(red_x: float, red_y: float) -> bytes:
     blob[0x19] = ((rx & 0x03) << 6) | ((ry & 0x03) << 4)
     blob[0x1B] = rx >> 2
     blob[0x1C] = ry >> 2
-    return _harness.valid_edid(blob)
+    return valid_edid(blob)
 
 
 def root_dump(external=None, edid_path=None):
@@ -131,10 +159,10 @@ class StateGuard:
     """
 
     def run(self, result=None):
-        saved = [_snapshot(M.Plugin), _snapshot(M), _snapshot(M.vibrance_lutfile),
+        saved = [_snapshot(M.Controller), _snapshot(M), _snapshot(M.vibrance_lutfile),
                  _snapshot(M.vibrance_x11), _snapshot(M.vibrance_host),
                  _snapshot(M.vibrance_settings), _snapshot(M.vibrance_effects),
-                 _snapshot(M.vibrance_panel), _snapshot(M.vibrance_state), _snapshot(M.updater)]
+                 _snapshot(M.vibrance_panel), _snapshot(M.vibrance_state)]
         _fresh_state()
         try:
             return super().run(result)
@@ -145,15 +173,15 @@ class StateGuard:
 
 
 class PluginTest(StateGuard, unittest.TestCase):
-    """A synchronous test whose changes to Plugin and main are undone."""
+    """A synchronous test whose changes to the Controller and its module are undone."""
 
 
 class PluginCase(StateGuard, unittest.IsolatedAsyncioTestCase):
-    """A ready Plugin on the built-in panel with every external effect faked."""
+    """A ready Controller on the built-in panel with every external effect faked."""
 
     def setUp(self):
         self.patches = []
-        self.plugin = M.Plugin()
+        self.plugin = M.Controller()
         # A fresh state (StateGuard reset it) that has loaded its settings and
         # connected to gamescope on the built-in panel.
         M.state.public.update(ready=True, reason="ready")
@@ -161,7 +189,7 @@ class PluginCase(StateGuard, unittest.IsolatedAsyncioTestCase):
         M.state.sdr_baseline = 0.4
         # Speed, not blind spots: no disk writes and no debounce here. The real
         # save and the debounce have tests of their own (SaveWrites, Debounce).
-        self.mock(M.Plugin, "_save")
+        self.mock(M.Controller, "_save")
         self.mock(M.vibrance_lutfile, "disabled", False)
         self.mock(M.vibrance_x11, "timeout", 3.0)
         self.mock(M, "DEBOUNCE_S", 0)

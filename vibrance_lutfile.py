@@ -12,9 +12,9 @@ gamescope only ever sees complete files. Nothing here imports `decky`.
 import os
 import subprocess
 import threading
-import time
 from collections import OrderedDict
 
+import dk_process
 import vibrance_host
 import vibrance_lut
 
@@ -32,45 +32,34 @@ _cache = OrderedDict()
 disabled = False
 
 
+# The native worker's deadline; a build takes about a third of a second.
+WORKER_S = 30
+
+
 def generate(saturation, size, encoding, source_white, cancelled) -> str:
-    """The .cube text, built natively when Decky runs under emulation."""
-    interpreter = vibrance_host.native_python()
-    if interpreter is None:
+    """The .cube text, built natively when Decky runs under emulation.
+
+    Emulated Python is far too slow for the maths, so the host's own
+    interpreter runs vibrance_lut.py as a script (dk_process: python -I, a
+    deadline, killed on cancel or unload).
+    """
+    if not dk_process.emulated():
         return vibrance_lut.generate(saturation, size, encoding, source_white,
                                      cancelled=cancelled)
     # Same validation as generate(), before arguments become CLI strings.
     vibrance_lut.validate(saturation, size, encoding, source_white)
-    if cancelled() or disabled:
-        raise vibrance_lut.BuildCancelled()
-    env = vibrance_host.system_env()
-    # PyInstaller's library path must not reach the system Python.
-    env.pop("PYTHONHOME", None)
-    env.pop("PYTHONPATH", None)
-    with subprocess.Popen(
-            [interpreter, "-I", os.path.realpath(vibrance_lut.__file__),
-             repr(saturation), str(size), encoding,
+    try:
+        code, output, error = dk_process.run_helper(
+            [os.path.realpath(vibrance_lut.__file__), repr(saturation), str(size), encoding,
              repr(source_white[0]), repr(source_white[1])],
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, env=env,
-            close_fds=(os.name == "nt")) as worker:
-        deadline = time.monotonic() + 30
-        try:
-            while True:
-                if cancelled() or disabled:
-                    raise vibrance_lut.BuildCancelled()
-                if time.monotonic() >= deadline:
-                    raise ValueError("native LUT worker timed out")
-                try:
-                    output, error = worker.communicate(timeout=0.05)
-                    break
-                except subprocess.TimeoutExpired:
-                    continue
-            if worker.returncode:
-                raise ValueError("native LUT worker failed: " + error.decode(errors="replace")[:300])
-            return output.decode("utf-8")
-        finally:
-            if worker.poll() is None:
-                worker.kill()
-                worker.communicate()
+            WORKER_S, lambda: cancelled() or disabled, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    except InterruptedError:
+        raise vibrance_lut.BuildCancelled() from None
+    except TimeoutError:
+        raise ValueError("native LUT worker timed out") from None
+    if code:
+        raise ValueError("native LUT worker failed: " + error.decode(errors="replace")[:300])
+    return output.decode("utf-8")
 
 
 def write(path, saturation, encoding, source_white, cancelled) -> bool:

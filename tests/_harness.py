@@ -1,92 +1,54 @@
 # SPDX-License-Identifier: BSD-3-Clause
-# Copyright (c) 2026 Rayekkk
-# https://github.com/Rayekkk/DeckyVibranceHDR
+# Shared from DeckyKit (shared/tests/_harness.py): change it there, then `kit sync`.
 
-"""Minimal stand-ins for the two modules DeckyLoader injects at runtime.
+"""Stand-in for the `decky` module DeckyLoader injects, so main.py imports outside the loader.
+Import it first in every backend test: `import _harness  # noqa: F401`.
 
-Importing main.py outside the loader fails on `import decky` and
-`from settings import SettingsManager`, so tests put these on sys.modules first.
-Mirrors the harness used by the sibling plugins.
+Sources: DeckyLS/FSR4Injector/DeckyReshade/DeckyVibranceHDR tests/_harness.py (module stand-in, temp folders),
+Ayaneo3Companion tests/_harness.py and LegionGo2Companion tests/support.py (DECKY_PLUGIN_DIR, emit, a hung run
+dumps every thread's stack).
+Guarantees: tests never touch the real home, settings or runtime folders (all under one fresh temp folder);
+decky.logger is a real logging.Logger (assertLogs works) that prints nothing; decky.emit records events in
+decky.emitted; a suite that hangs for 8 minutes exits with every thread's stack instead of stalling CI.
+Deliberately not here: stand-ins for plugin modules (a plugin's own test support adds them).
 """
 
+import faulthandler
+import logging
 import os
 import sys
+import tempfile
 import types
 
-
-def valid_edid(blob):
-    """Seal a complete synthetic EDID with its header and per-block checksums."""
-    blob = bytearray(blob)
-    blob[:8] = b"\x00\xff\xff\xff\xff\xff\xff\x00"
-    for pos in range(0, len(blob), 128):
-        blob[pos + 127] = (-sum(blob[pos:pos + 127])) & 255
-    return bytes(blob)
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+HANG_SECONDS = 480
 
 
-def install(settings_dir: str | None = None) -> None:
-    # lego_updater imports pwd, which only exists on Unix. Stubbing it keeps the
-    # logic suite runnable on a Windows dev box without the shared updater having
-    # to differ from the copy in the sibling plugins.
-    if "pwd" not in sys.modules:
-        try:
-            import pwd  # noqa: F401
-        except ModuleNotFoundError:
-            pwd_mod = types.ModuleType("pwd")
-            pwd_mod.struct_passwd = tuple
-            pwd_mod.getpwall = lambda: []
-            pwd_mod.getpwnam = lambda name: None
-            sys.modules["pwd"] = pwd_mod
+def install():
+    if "decky" in sys.modules:
+        return sys.modules["decky"]
+    faulthandler.dump_traceback_later(HANG_SECONDS, exit=True)
+    decky = types.ModuleType("decky")
+    decky.logger = logging.getLogger("decky-test")
+    decky.logger.addHandler(logging.NullHandler())
+    decky.logger.propagate = False
+    base = tempfile.mkdtemp(prefix="decky-test-")
+    decky.DECKY_PLUGIN_DIR = ROOT
+    decky.DECKY_PLUGIN_SETTINGS_DIR = os.path.join(base, "settings")
+    decky.DECKY_PLUGIN_RUNTIME_DIR = os.path.join(base, "runtime")
+    decky.DECKY_PLUGIN_LOG_DIR = os.path.join(base, "logs")
+    decky.DECKY_USER_HOME = os.path.join(base, "home")
+    decky.DECKY_HOME = os.path.join(base, "homebrew")
+    decky.emitted = []
 
-    if "decky" not in sys.modules:
-        decky = types.ModuleType("decky")
+    async def emit(event, *args):
+        decky.emitted.append((event, *args))
 
-        class _Logger:
-            @staticmethod
-            def info(msg):
-                print(f"[info ] {msg}")
+    decky.emit = emit
+    sys.modules["decky"] = decky
+    return decky
 
-            @staticmethod
-            def warning(msg):
-                print(f"[warn ] {msg}")
 
-            @staticmethod
-            def error(msg):
-                print(f"[error] {msg}")
-
-        decky.logger = _Logger()
-        decky.DECKY_PLUGIN_SETTINGS_DIR = settings_dir or os.path.join(
-            os.path.dirname(os.path.abspath(__file__)), "_settings"
-        )
-        os.makedirs(decky.DECKY_PLUGIN_SETTINGS_DIR, exist_ok=True)
-        sys.modules["decky"] = decky
-
-    if "settings" not in sys.modules:
-        settings_mod = types.ModuleType("settings")
-
-        class SettingsManager:
-            def __init__(self, name, settings_directory):
-                self._store = {}
-
-            @property
-            def settings(self):
-                return self._store
-
-            @settings.setter
-            def settings(self, value):
-                self._store = value
-
-            def read(self):
-                return self._store
-
-            def getSetting(self, key, default=None):
-                return self._store.get(key, default)
-
-            def setSetting(self, key, value):
-                self._store[key] = value
-                self.commit()
-
-            def commit(self):
-                pass
-
-        settings_mod.SettingsManager = SettingsManager
-        sys.modules["settings"] = settings_mod
+install()

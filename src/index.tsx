@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Rayekkk
 // https://github.com/Rayekkk/DeckyVibranceHDR
 
-import { callable, definePlugin, toaster } from "@decky/api";
+import { callable, definePlugin } from "@decky/api";
 import {
   ButtonItem,
   Field,
@@ -13,8 +13,10 @@ import {
   staticClasses,
   ToggleField,
 } from "@decky/ui";
-import { FC, useCallback, useEffect, useRef, useState } from "react";
-import { createStateSync, WRITE_PENDING } from "./stateSync";
+import { FC, useEffect, useState } from "react";
+import { Result } from "./result";
+import { disposeUpdates, notify, UpdateSection } from "./updates";
+import { createWriteQueue } from "./writeQueue";
 
 interface State {
   ready: boolean;
@@ -24,6 +26,7 @@ interface State {
   sdr_saturation: number;
   hdr_saturation: number;
   sdr_applied: boolean;
+  sdr_look_applied: boolean;
   hdr_applied: boolean;
   hdr_applied_saturation: number | null;
   sdr_look_saturation: number | null;
@@ -46,197 +49,84 @@ interface State {
   hdr_soft_limit: number;
 }
 
-interface UpdateInfo {
-  current_version?: string;
-  latest_version?: string;
-  update_available?: boolean;
-  download_url?: string;
-  asset_name?: string;
-  error?: string;
-}
+const getState = callable<[], Result<State>>("get_state");
+const setSdrEnabled = callable<[boolean, number], Result<State>>("set_sdr_enabled");
+const setHdrEnabled = callable<[boolean, number], Result<State>>("set_hdr_enabled");
+const setSdrSaturation = callable<[number], Result<State>>("set_sdr_saturation");
+const setHdrSaturation = callable<[number], Result<State>>("set_hdr_saturation");
+const resetAll = callable<[], Result<State>>("reset");
 
-const getState = callable<[], State>("get_state");
-const setSdrEnabled = callable<[boolean, number], State>("set_sdr_enabled");
-const setHdrEnabled = callable<[boolean, number], State>("set_hdr_enabled");
-const setSdrSaturation = callable<[number], State>("set_sdr_saturation");
-const setHdrSaturation = callable<[number], State>("set_hdr_saturation");
-const resetAll = callable<[], State>("reset");
-const getVersion = callable<[], { version: string }>("get_version");
-const checkForUpdates = callable<[], UpdateInfo>("check_for_updates");
-const performUpdate = callable<
-  [string, string],
-  { success: boolean; path?: string; error?: string }
->("perform_update");
-
-const notify = (title: string, body: string) =>
-  toaster.toast({ title, body, duration: 5000 });
+/** Shown while a write has not answered; the backend may still be working. */
+const WRITE_PENDING = "Backend write is still pending; waiting for its result";
+/** Shown while a read has not answered; Decky replays it, so no second read is sent. */
+const READ_TIMED_OUT = "Error: Backend read timed out";
+// Quick while the backend is busy or not ready (a LUT build, a reconnect), slow when nothing is moving: the
+// backend itself re-reads the display every 5 s, so a faster poll would only repeat the same answer.
+const POLL_BUSY_MS = 1000;
+const POLL_IDLE_MS = 3000;
 
 const pct = (v: number) => `${Math.round(v * 100)}%`;
+// A damaged file brought back from its last good copy is no reset (vibrance_settings.load words both).
+const noticeLabel = (notice: string) => notice.includes("last good copy") ? "Settings restored" : "Settings reset";
 // A slow write is a backend still at work, not one that is unreachable.
 const connectionLabel = (message: string) =>
   message === WRITE_PENDING ? "Waiting for backend" : "Backend unavailable";
 
-// ── Updates ────────────────────────────────────────────────────────────────────
-// Operations and results outlive the QAM component. A reopened panel subscribes
-// to the same request rather than starting another or losing a completed file.
-let updates = { info: null as UpdateInfo | null, version: "", checking: false,
-  downloading: false, downloadPath: null as string | null };
-const updateListeners = new Set<(state: typeof updates) => void>();
-let updatesDisposed = false;
-let versionReading: Promise<void> | null = null;
-const updateSnapshot = (patch: Partial<typeof updates>) => {
-  if (updatesDisposed) return;
-  updates = { ...updates, ...patch };
-  for (const listener of updateListeners) listener(updates);
-};
-const updateError = (title: string, message: string) => {
-  updateSnapshot({ info: { ...updates.info, error: message } });
-  if (!updatesDisposed && updateListeners.size) notify(title, message);
-};
-const readVersion = () => {
-  if (updatesDisposed || versionReading || updates.version) return;
-  versionReading = (async () => {
-    try { const result = await getVersion(); updateSnapshot({ version: result.version ?? "" }); }
-    catch { /* A later mount can retry the version read. */ }
-    finally { versionReading = null; }
-  })();
-};
-const checkUpdate = async () => {
-  if (updatesDisposed || updates.checking || updates.downloading) return;
-  updateSnapshot({ checking: true, info: null });
-  try {
-    const info = await checkForUpdates();
-    // Keep a finished download while it is still the release on offer, and
-    // when the check failed, since a failed check offers nothing new.
-    const same = !!info.asset_name && !!updates.downloadPath?.endsWith(`/${info.asset_name}`);
-    updateSnapshot({ info, downloadPath: same || info.error ? updates.downloadPath : null });
-  }
-  catch (e) { updateError("Update check failed", e instanceof Error ? e.message : String(e)); }
-  finally { updateSnapshot({ checking: false }); }
-};
-const downloadUpdate = async () => {
-  const info = updates.info;
-  if (updatesDisposed || updates.checking || updates.downloading
-      || !info?.download_url || !info?.asset_name) return;
-  updateSnapshot({ downloading: true, info: { ...info, error: undefined } });
-  try {
-    const result = await performUpdate(info.download_url, info.asset_name);
-    if (result.success && result.path) updateSnapshot({ downloadPath: result.path });
-    else updateError("Download failed", result.error ?? "Unknown error");
-  } catch (e) { updateError("Download failed", e instanceof Error ? e.message : String(e)); }
-  finally { updateSnapshot({ downloading: false }); }
-};
-const UpdateSection: FC = () => {
-  const [state, setState] = useState(updates);
-  const { info, version, checking, downloading, downloadPath } = state;
-  const mounted = useRef(false);
-  useEffect(() => {
-    mounted.current = true;
-    updateListeners.add(setState);
-    setState(updates);
-    readVersion();
-    return () => { mounted.current = false; updateListeners.delete(setState); };
-  }, []);
-  const check = useCallback(async () => {
-    if (mounted.current) await checkUpdate();
-  }, []);
-  const download = useCallback(async () => {
-    if (mounted.current) await downloadUpdate();
-  }, []);
-
-  return (
-    <PanelSection title="Updates">
-      <PanelSectionRow>
-        <Field label="Installed" focusable>
-          {`v${info?.current_version || version || "?"}`}
-        </Field>
-      </PanelSectionRow>
-
-      {info?.latest_version && !info.error && (
-        <PanelSectionRow>
-          <Field label="Latest" focusable>{`v${info.latest_version}`}</Field>
-        </PanelSectionRow>
-      )}
-
-      {info?.error && (
-        <PanelSectionRow>
-          <Field label="Error" description={info.error} focusable />
-        </PanelSectionRow>
-      )}
-
-      {info && !info.error && !info.update_available && !downloadPath && (
-        <PanelSectionRow>
-          <Field label="Up to date" focusable />
-        </PanelSectionRow>
-      )}
-
-      {info?.update_available && info.download_url && info.asset_name && !downloadPath && (
-        <PanelSectionRow>
-          <ButtonItem layout="below" onClick={download} disabled={downloading}>
-            {downloading ? "Downloading..." : `Download v${info.latest_version}`}
-          </ButtonItem>
-        </PanelSectionRow>
-      )}
-
-      {downloadPath && (
-        <PanelSectionRow>
-          <Field
-            label="Downloaded"
-            focusable
-            description={
-              `${downloadPath}. To install it, open Decky's settings, turn on ` +
-              "Developer mode under General, then open Developer, choose Browse next to " +
-              "Install Plugin from ZIP File, Continue on Decky's warning, pick this " +
-              "file and confirm. It replaces this version; your " +
-              "settings are kept."
-            }
-          />
-        </PanelSectionRow>
-      )}
-
-      <PanelSectionRow>
-        <ButtonItem layout="below" onClick={check} disabled={checking || downloading}>
-          {checking ? "Checking..." : "Check for updates"}
-        </ButtonItem>
-      </PanelSectionRow>
-    </PanelSection>
-  );
-};
-
-// ── Main content ───────────────────────────────────────────────────────────────
 // QAM content can unmount while an RPC is in flight. Keep one queue across
 // openings so a previous panel cannot send an old edit after the new one.
-const pluginStateSync = createStateSync<State>(getState,
-  error => notify("Setting failed", String(error)));
+const queue = createWriteQueue<State>(getState,
+  { onError: result => notify("Setting failed", result.error || "Unknown error") });
+
+const busy = (state: State | null, problem: string) => !state || !state.ready || !!problem || state.generating
+  || state.sdr_generating || !!(state.sdr_error || state.sdr_look_error || state.hdr_error || state.settings_error);
+
 // Decky unmounts it while the Quick Access Menu is closed, which stops the polling.
 const Content: FC = () => {
-  const [state, setState] = useState<State | null>(null);
-  const [connectionError, setConnectionError] = useState("");
-
-  const sync = pluginStateSync;
+  const [view, setView] = useState(queue.get());
+  useEffect(() => {
+    setView(queue.get());
+    return queue.subscribe(() => setView(queue.get()));
+  }, []);
 
   useEffect(() => {
-    return sync.subscribe(setState, setConnectionError);
-  }, [sync]);
-
-  useEffect(() => {
-    let stopped = false;
-    let timer: ReturnType<typeof setTimeout>;
+    let stopped = false, polling = false, due = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const schedule = () => {
+      if (stopped || polling) return;
+      const now = queue.get();
+      const wait = busy(now.state, now.error || now.slow) ? POLL_BUSY_MS : POLL_IDLE_MS;
+      if (timer !== undefined && due <= Date.now() + wait) return;  // already that soon
+      clearTimeout(timer);
+      due = Date.now() + wait;
+      timer = setTimeout(poll, wait);
+    };
     const poll = async () => {
-      await sync.refresh();
-      if (!stopped) timer = setTimeout(poll, 1000);
+      timer = undefined;
+      polling = true;
+      await queue.read();
+      polling = false;
+      schedule();
     };
     void poll();
-    return () => { stopped = true; clearTimeout(timer); };
-  }, [sync]);
+    // A change that starts work (a colour table being prepared) brings the next poll forward.
+    const off = queue.subscribe(schedule);
+    return () => { stopped = true; off(); clearTimeout(timer); };
+  }, []);
 
-  // Slider moves are applied optimistically so the control stays responsive;
-  // the backend is what decides the value that actually lands.
-  const push = useCallback(
-    <K extends keyof State>(fn: (v: State[K]) => Promise<State>, key: K, value: State[K]) =>
-      sync.mutate(key, value, () => fn(value)),
-    [sync],
-  );
+  const state = view.state;
+  const connectionError = view.slow === "write" ? WRITE_PENDING : view.slow === "read" ? READ_TIMED_OUT : view.error;
+
+  // Slider moves are shown at once so the control stays responsive; the
+  // backend is what decides the value that actually lands.
+  const slide = (key: "sdr_saturation" | "hdr_saturation", set: (v: number) => Promise<Result<State>>) =>
+    (v: number) => queue.write(key, () => set(v), { patch: { [key]: v } });
+  const toggle = (half: "sdr" | "hdr", set: (on: boolean, saturation: number) => Promise<Result<State>>) =>
+    (v: boolean) => {
+      // The toggle carries the newest slider value and makes its unsent moves pointless.
+      const saturation = queue.get().state?.[`${half}_saturation`] ?? 1;
+      return queue.write(`${half}-toggle`, () => set(v, saturation),
+        { patch: { [`${half}_enabled`]: v, [`${half}_saturation`]: saturation }, supersedes: [`${half}_saturation`] });
+    };
 
   if (!state) {
     return (
@@ -267,7 +157,7 @@ const Content: FC = () => {
           <Field label={settingsLabel} description={state.settings_error} />
         </PanelSectionRow>}
         {state.settings_notice && <PanelSectionRow>
-          <Field label="Settings reset" description={state.settings_notice} />
+          <Field label={noticeLabel(state.settings_notice)} description={state.settings_notice} />
         </PanelSectionRow>}
       </PanelSection><UpdateSection key="updates" /></>
     );
@@ -281,7 +171,7 @@ const Content: FC = () => {
         {state.settings_error && <PanelSectionRow>
           <Field label="Settings not saved" description={state.settings_error} /></PanelSectionRow>}
         {state.settings_notice && <PanelSectionRow>
-          <Field label="Settings reset" description={state.settings_notice} /></PanelSectionRow>}
+          <Field label={noticeLabel(state.settings_notice)} description={state.settings_notice} /></PanelSectionRow>}
       </PanelSection>}
       {state.conflict && (
         <PanelSection title="Heads up">
@@ -334,11 +224,7 @@ const Content: FC = () => {
             label="Enabled"
             description="Applies to the Steam UI and any game not running in HDR."
             checked={state.sdr_enabled}
-            onChange={(v) => {
-              const saturation = sync.snapshot()?.sdr_saturation ?? state.sdr_saturation;
-              return sync.command({ sdr_enabled: v, sdr_saturation: saturation },
-                () => setSdrEnabled(v, saturation), ["sdr_saturation"], { key: "sdr-toggle" });
-            }}
+            onChange={toggle("sdr", setSdrEnabled)}
           />
         </PanelSectionRow>
 
@@ -358,7 +244,7 @@ const Content: FC = () => {
                 max={state.sdr_max}
                 step={0.01}
                 minimumDpadGranularity={40}
-                onChange={(v) => push(setSdrSaturation, "sdr_saturation", v)}
+                onChange={slide("sdr_saturation", setSdrSaturation)}
               />
             </PanelSectionRow>
             <PanelSectionRow>
@@ -393,11 +279,7 @@ const Content: FC = () => {
             label="Enabled"
             description="Applies only to games actually running in HDR."
             checked={state.hdr_enabled}
-            onChange={(v) => {
-              const saturation = sync.snapshot()?.hdr_saturation ?? state.hdr_saturation;
-              return sync.command({ hdr_enabled: v, hdr_saturation: saturation },
-                () => setHdrEnabled(v, saturation), ["hdr_saturation"], { key: "hdr-toggle" });
-            }}
+            onChange={toggle("hdr", setHdrEnabled)}
           />
         </PanelSectionRow>
 
@@ -417,7 +299,7 @@ const Content: FC = () => {
                 max={state.hdr_max}
                 step={0.01}
                 minimumDpadGranularity={25}
-                onChange={(v) => push(setHdrSaturation, "hdr_saturation", v)}
+                onChange={slide("hdr_saturation", setHdrSaturation)}
               />
             </PanelSectionRow>
             <PanelSectionRow>
@@ -446,10 +328,9 @@ const Content: FC = () => {
         <PanelSectionRow>
           <ButtonItem
             layout="below"
-            onClick={() => sync.command({ sdr_enabled: false, hdr_enabled: false,
-              sdr_saturation: 1, hdr_saturation: 1 }, resetAll,
-              ["sdr_saturation", "hdr_saturation"],
-              { key: "reset", supersedes: ["sdr-toggle", "hdr-toggle"] })}
+            onClick={() => queue.write("reset", resetAll, {
+              patch: { sdr_enabled: false, hdr_enabled: false, sdr_saturation: 1, hdr_saturation: 1 },
+              supersedes: ["sdr_saturation", "hdr_saturation", "sdr-toggle", "hdr-toggle"] })}
           >
             Back to defaults
           </ButtonItem>
@@ -475,9 +356,8 @@ export default definePlugin(() => ({
   content: <Content />,
   icon: <VibranceIcon />,
   onDismount() {
-    pluginStateSync.dispose();
-    updatesDisposed = true;
-    updateListeners.clear();
+    queue.dispose();
+    disposeUpdates();
     /* the backend restores both settings in _unload */
   },
 }));

@@ -11,6 +11,7 @@ venv/
 # Build output
 dist/
 build/
+artifacts/
 *.zip
 *.tsbuildinfo
 
@@ -26,7 +27,3 @@ tests/_settings/
 # OS
 .DS_Store
 Thumbs.db
-
-# Claude Code
-.claude/
-CLAUDE.md

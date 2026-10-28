@@ -16,8 +16,8 @@ from collections import OrderedDict
 from pathlib import Path
 from unittest.mock import patch
 
-from _fixtures import PluginCase, PluginTest, WRITE_LOOK, drain  # installs the loader stand-ins first
-import main as M
+from _fixtures import PluginCase, PluginTest, WRITE_LOOK, drain, write_settings  # installs the decky stand-in first
+import vibrance_control as M
 import vibrance_lut as V
 
 
@@ -95,7 +95,7 @@ class Setters(PluginTest):
     """
 
     def setUp(self):
-        self.plugin = M.Plugin()
+        self.plugin = M.Controller()
         M.state.settings_loaded = True  # StateGuard resets it afterwards
         M.state.public["sdr_enabled"] = False
         M.state.public["hdr_enabled"] = False
@@ -118,7 +118,7 @@ class Setters(PluginTest):
     def test_saved_values_from_an_older_range_are_lifted_on_load(self):
         """1.0.0 allowed 0.0. Without the migration those users come back to a
         drained picture the new UI cannot even represent."""
-        M.settings._store.update({
+        write_settings({
             "sdr_saturation": 0.4,
             "hdr_saturation": 0.0,
             "sdr_enabled": True,
@@ -129,7 +129,7 @@ class Setters(PluginTest):
             # part to a task that drain() cancels, so no subprocess runs.
             drain(self.plugin._main())
         finally:
-            M.settings._store.clear()
+            write_settings(None)
         self.assertEqual(M.state.public["sdr_saturation"], 1.0)
         self.assertEqual(M.state.public["hdr_saturation"], 1.0)
 
@@ -158,7 +158,7 @@ class SerializedMutations(PluginTest):
             return True
 
         async def scenario():
-            plugin = M.Plugin()
+            plugin = M.Controller()
             enabling = asyncio.create_task(plugin.set_sdr_enabled(True))
             self.assertTrue(await asyncio.to_thread(apply_started.wait, 1))
             disabling = asyncio.create_task(plugin.set_sdr_enabled(False))
@@ -170,10 +170,10 @@ class SerializedMutations(PluginTest):
             result.update(M.state.public)
 
         M.state.settings_loaded = True
-        M.Plugin._save = staticmethod(fake_save)
+        M.Controller._save = staticmethod(fake_save)
         M.vibrance_effects.apply_sdr = staticmethod(fake_apply)
         M.vibrance_effects.release_sdr = staticmethod(fake_release)
-        M.Plugin._schedule_look = lambda self, component: None
+        M.Controller._schedule_look = lambda self, component: None
         M.state.mutation_lock = asyncio.Lock()
         M.state.unloading = False
         M.state.disconnected = False
@@ -298,7 +298,7 @@ class StaleLookJobs(PluginTest):
             return os.path.join(M.vibrance_effects.runtime_dir(), "hdr-look-1.cube")
 
         async def scenario():
-            plugin = M.Plugin()
+            plugin = M.Controller()
             plugin._schedule_look("hdr")
             worker = M.state.tasks[-1]
             for _ in range(1000):  # bounded: a regression fails instead of hanging
@@ -339,7 +339,7 @@ class StaleLookJobs(PluginTest):
         result = {}
 
         async def scenario():
-            plugin = M.Plugin()
+            plugin = M.Controller()
             plugin._schedule_look("sdr")
             worker = M.state.tasks[-1]
             await asyncio.gather(worker, return_exceptions=True)
@@ -432,7 +432,7 @@ class RequestHandling(PluginCase):
         calls = []
         self.mock(M.vibrance_effects, "release_sdr", side_effect=lambda: calls.append("sdr"))
         self.mock(M.vibrance_effects, "release_look", side_effect=calls.append)
-        self.mock(M.Plugin, "_save", side_effect=lambda values=None: calls.append("save"))
+        self.mock(M.Controller, "_save", side_effect=lambda values=None: calls.append("save"))
         M.vibrance_x11.timeout = 3.0                       # what _main leaves it at
         await self.plugin._unload()
         self.assertEqual(sorted(calls), ["hdr", "save", "sdr"])
@@ -446,7 +446,7 @@ class RequestHandling(PluginCase):
         saved, seen = threading.Event(), []
         self.mock(M.vibrance_effects, "release_sdr", side_effect=lambda: seen.append(saved.wait(5)))
         self.mock(M.vibrance_effects, "release_look", side_effect=lambda component: None)
-        self.mock(M.Plugin, "_save", side_effect=lambda values=None: saved.set())
+        self.mock(M.Controller, "_save", side_effect=lambda values=None: saved.set())
         await self.plugin._unload()
         self.assertEqual(seen, [True])
 
@@ -648,12 +648,12 @@ class Controls(PluginCase):
         await self.plugin.set_hdr_enabled(True)
         await self.drain()
         self.builder.reset_mock()
-        M.Plugin._save.reset_mock()
+        M.Controller._save.reset_mock()
         for _ in range(30):
             await self.plugin.set_hdr_saturation(1.3)
         await self.drain()
         self.builder.assert_not_called()
-        M.Plugin._save.assert_not_called()
+        M.Controller._save.assert_not_called()
         self.assertFalse(M.state.public["generating"])
 
     async def test_unchanged_healthy_sdr_does_not_write_or_save(self):
@@ -661,15 +661,15 @@ class Controls(PluginCase):
         await self.plugin.set_sdr_enabled(True)
         await self.drain()
         self.float_writer.reset_mock()
-        M.Plugin._save.reset_mock()
+        M.Controller._save.reset_mock()
         for _ in range(30):
             await self.plugin.set_sdr_saturation(1.4)
         await self.drain()
         self.float_writer.assert_not_called()
-        M.Plugin._save.assert_not_called()
+        M.Controller._save.assert_not_called()
 
     async def test_unchanged_value_can_retry_failed_apply_and_save(self):
-        M.Plugin._save.side_effect = OSError("disk full")
+        M.Controller._save.side_effect = OSError("disk full")
         await self.plugin.set_hdr_saturation(1.3)
         self.builder.side_effect = None
         self.builder.return_value = ""
@@ -679,15 +679,15 @@ class Controls(PluginCase):
         self.assertIn("disk full", M.state.public["settings_error"])
         self.assertTrue(M.state.settings_dirty)
         self.builder.return_value = "/tmp/hdr-look-1.cube"
-        M.Plugin._save.side_effect = None
-        M.Plugin._save.reset_mock()
+        M.Controller._save.side_effect = None
+        M.Controller._save.reset_mock()
         await self.plugin.set_hdr_saturation(1.3)
         await self.drain()
         self.assertEqual(M.state.public["hdr_applied_saturation"], 1.3)
         self.assertEqual(M.state.public["hdr_error"], "")
         self.assertEqual(M.state.public["settings_error"], "")
         self.assertFalse(M.state.settings_dirty)
-        M.Plugin._save.assert_called_once()
+        M.Controller._save.assert_called_once()
 
     async def test_unchanged_values_rebuild_missing_hdr_and_sdr_files(self):
         M.state.sdr_neutral_atom, M.state.sdr_atom_span = 0, 1
@@ -1007,7 +1007,7 @@ class LookOwnership(PluginCase):
         self.assertFalse(M.vibrance_effects.release_look("hdr"))
         self.string_writer.side_effect = self.write_string
         M.state.slow_checks = M.SLOW_CHECK_EVERY - 1
-        M.Plugin._watch_once(None)
+        M.Controller._watch_once(None)
         self.assertEqual(self.strings[M.vibrance_x11.ATOM_LOOK_PQ], "")
         self.assertIsNone(M.state.hdr_look_path)
 
@@ -1027,7 +1027,7 @@ class SdrRecovery(PluginCase):
                               sdr_error="could not write SDR to gamescope")
         M.state.last_sdr_written = self.live_sdr = 1.5
         M.state.last_sdr_attempted = 1.8
-        M.Plugin._watch_once(None)
+        M.Controller._watch_once(None)
         self.assertAlmostEqual(self.live_sdr, 1.8)
         self.assertEqual(M.state.public["sdr_error"], "")
 
@@ -1133,7 +1133,7 @@ class LookBuildFailureLogging(PluginCase):
         """
         self.builder.side_effect = WRITE_LOOK         # the real one
         self.mock(M.vibrance_lutfile, "write", side_effect=OSError(28, "No space left on device"))
-        error = self.mock(M.decky.logger, "error")
+        error = self.mock(M.vibrance_state.logger, "error")
         M.state.public.update(hdr_enabled=True, hdr_saturation=1.3)
         for _ in range(3):
             self.plugin._schedule_look("hdr")
@@ -1141,21 +1141,6 @@ class LookBuildFailureLogging(PluginCase):
         logged = [c.args[0] for c in error.call_args_list if "could not write look" in c.args[0]]
         self.assertEqual(len(logged), 1, logged)
         self.assertIn("could not build", M.state.public["hdr_error"])
-
-
-class RpcSurface(PluginCase):
-    """The frontend's own reads; every other suite reads state.public directly."""
-
-    async def test_reads_answer_with_a_copy_of_the_state_the_version_and_the_download(self):
-        state = await self.plugin.get_state()
-        self.assertEqual(state, M.state.public)
-        self.assertIsNot(state, M.state.public)
-        with patch.object(M.updater, "plugin_version", return_value="9.9.9"):
-            self.assertEqual(await self.plugin.get_version(), {"version": "9.9.9"})
-        result = {"success": True, "path": "/home/deck/Downloads/x.zip"}
-        with patch.object(M.updater, "download", return_value=result) as download:
-            self.assertEqual(await self.plugin.perform_update("https://github.com/x.zip", "x.zip"), result)
-        download.assert_called_once_with("https://github.com/x.zip", "x.zip")
 
 
 class ToggleArguments(PluginCase):
@@ -1237,15 +1222,15 @@ class ResetAndPersistence(PluginCase):
         await self.plugin.reset()
         await self.drain()
         self.assertEqual({k: M.state.public[k] for k in M.DEFAULT_SETTINGS}, M.DEFAULT_SETTINGS)
-        self.assertEqual(M.Plugin._save.call_args.args[0], M.DEFAULT_SETTINGS)
+        self.assertEqual(M.Controller._save.call_args.args[0], M.DEFAULT_SETTINGS)
 
     async def test_switching_hdr_and_moving_sdr_are_saved(self):
         await self.plugin.set_hdr_enabled(True, 1.2)
         await self.drain()
-        self.assertTrue(M.Plugin._save.call_args.args[0]["hdr_enabled"])
+        self.assertTrue(M.Controller._save.call_args.args[0]["hdr_enabled"])
         await self.plugin.set_sdr_saturation(1.7)
         await self.drain()
-        self.assertEqual(M.Plugin._save.call_args.args[0]["sdr_saturation"], 1.7)
+        self.assertEqual(M.Controller._save.call_args.args[0]["sdr_saturation"], 1.7)
 
 
 class SaveWrites(PluginTest):
@@ -1253,8 +1238,8 @@ class SaveWrites(PluginTest):
         M.state.settings_loaded = True
         M.state.unloading = False
         with patch.object(M.vibrance_settings, "write") as write:
-            M.Plugin._save({"sdr_enabled": True})
-        write.assert_called_once_with(M.settings, {"sdr_enabled": True})
+            M.Controller._save({"sdr_enabled": True})
+        write.assert_called_once_with(M.settings_path, {"sdr_enabled": True})
 
 
 class WorkersDebounce(PluginCase):
@@ -1275,7 +1260,7 @@ class WorkersDebounce(PluginCase):
         await self.plugin.set_sdr_saturation(1.7)
         await self.drain()
         self.assertEqual([c.args[1] for c in self.float_writer.call_args_list], [M.vibrance_effects.sdr_split(1.7)[0]])
-        self.assertEqual(M.Plugin._save.call_count, 1)
+        self.assertEqual(M.Controller._save.call_count, 1)
 
     async def test_a_disabled_hdr_half_never_shows_building(self):
         M.state.public["hdr_enabled"] = False
@@ -1295,7 +1280,7 @@ class LookFailureLogEdges(PluginCase):
                 raise outcome
             return outcome
         self.mock(M.vibrance_lutfile, "write", side_effect=write)
-        error = self.mock(M.decky.logger, "error")
+        error = self.mock(M.vibrance_state.logger, "error")
         M.state.public.update(hdr_enabled=True, hdr_saturation=1.3)
         for _ in range(3):
             self.plugin._schedule_look("hdr")
@@ -1307,7 +1292,7 @@ class LookFailureLogEdges(PluginCase):
         self.builder.side_effect = WRITE_LOOK
         self.mock(M.vibrance_lutfile, "write",
                   side_effect=lambda path, *_: (_ for _ in ()).throw(OSError(28, "No space left on device", path)))
-        error = self.mock(M.decky.logger, "error")
+        error = self.mock(M.vibrance_state.logger, "error")
         # 4.0 is past the atom's span (2.0 here), so the SDR half needs a look too.
         M.state.public.update(hdr_enabled=True, hdr_saturation=1.3, sdr_enabled=True, sdr_saturation=4.0)
         for _ in range(3):
@@ -1328,7 +1313,7 @@ class InvalidatedBuildClearsBuilding(PluginCase):
         self.mock(M, "DEBOUNCE_S", 0.05)
         self.plugin._schedule_look(component)
         self.assertTrue(M.state.public[flag])
-        M.Plugin._disconnect()
+        M.Controller._disconnect()
         await self.drain()
         self.assertFalse(M.state.public[flag])
         M.state.disconnected = False                 # same session comes back
@@ -1363,7 +1348,7 @@ class TrackedTaskLogging(PluginCase):
     and a cancelled one must not raise inside the done callback."""
 
     async def test_only_a_failed_task_is_logged(self):
-        error = self.mock(M.decky.logger, "error")
+        error = self.mock(M.vibrance_state.logger, "error")
         raised = []
         asyncio.get_running_loop().set_exception_handler(lambda _loop, context: raised.append(context))
         async def fine(): return 1
@@ -1371,7 +1356,7 @@ class TrackedTaskLogging(PluginCase):
         async def stuck(): await asyncio.sleep(10)
         tasks = [asyncio.create_task(c()) for c in (fine, broken, stuck)]
         for task in tasks:
-            M.Plugin._track(task)
+            M.Controller._track(task)
         tasks[2].cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await asyncio.sleep(0)                                   # done callbacks

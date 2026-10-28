@@ -18,6 +18,12 @@ Unreleased.
   message instead of the slider silently moving back the next time you open it.
 - While an external display is connected, the menu explains that your saved
   settings apply again once you unplug it.
+- A switch or reset no longer jumps ahead of a slider change you made before it;
+  changes reach the plugin in the order you made them.
+- The menu checks for changes every 3 seconds while nothing is happening, and
+  every second while colours are being prepared or something needs attention.
+- **Updates**: when no release can be offered (none is published yet, or its ZIP
+  is not ready), the section says why instead of "Up to date".
 
 ### Fixed
 
@@ -38,6 +44,14 @@ Unreleased.
 
 - Settings survive a power cut right after a change, and files left by an
   interrupted save are cleaned up.
+- A damaged settings file no longer resets everything: the plugin goes back to
+  the last good copy it keeps beside it, keeps the damaged file as
+  `settings.json.corrupt-…` and says so in the menu.
+- Updates download only the release ZIP GitHub lists for this plugin, with the
+  exact size and SHA-256 GitHub reports, and check every file in it before it is
+  saved; a download is refused unless the release is newer than the installed one.
+- Stopping or updating the plugin no longer waits for a slow or stuck update
+  check.
 - An update download that ends early is reported as failed instead of being
   kept, and a download in progress stops when the plugin stops.
 - Logs and settings errors name only the file, not the folders that contain
