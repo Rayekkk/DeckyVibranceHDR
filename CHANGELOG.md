@@ -12,8 +12,23 @@ All notable changes to Decky Vibrance HDR, newest first.
   or gamut. Control names are unchanged.
 - **Last applied** replaces "Last LUT sent" under **Now** and also appears for SDR
   on screens that use the additional colour table above 200%.
-- A setting that fails after you close the menu now shows the **Setting failed**
-  message instead of the slider silently moving back the next time you open it.
+- A setting that fails after you close the menu now shows a **Decky Vibrance HDR**
+  message with the reason instead of the slider silently moving back the next
+  time you open it.
+- A change the plugin refuses now also says why under that switch, slider or
+  **Back to defaults**, until you use that control again.
+- **About** is the new last row of the menu. Its page shows the version, author
+  and license, with **Updates** at the bottom; the Updates section is no longer
+  on the main menu.
+- **Updates** reads like the other plugins: **Installed version**, **Checking
+  GitHub…**, **Download <version>** and **<version> downloaded** with the saved
+  file shown as `~/Downloads/…` and a shorter install hint. A failed check or
+  download shows **Could not complete** with the reason in the section instead of
+  a message over the screen.
+- While the plugin is starting, the menu shows a spinner. If it cannot start, it
+  says **Decky Vibrance HDR unavailable** with the reason, a **Try again** button
+  and the Updates section, so a broken install can still be updated.
+- Menu texts use American spelling ("colors") and a single "…" character.
 - While an external display is connected, the menu explains that your saved
   settings apply again once you unplug it.
 - A switch or reset no longer jumps ahead of a slider change you made before it;

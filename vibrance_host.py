@@ -32,13 +32,6 @@ def loggable(exc) -> str:
     return str(exc)
 
 
-def shown(exc) -> str:
-    """*exc* as the panel shows it: an OSError by its description alone, never its paths."""
-    if isinstance(exc, OSError):
-        return exc.strerror or type(exc).__name__
-    return str(exc)
-
-
 def remove_stale(folder, belongs) -> None:
     """Delete the entries of *folder* that *belongs* names and a killed
     process left behind.

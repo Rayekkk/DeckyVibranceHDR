@@ -65,7 +65,8 @@ class RpcAnswers(PluginCase):
 
     async def test_version_and_updates_go_to_the_shared_updater(self):
         with patch.dict(os.environ, {"DECKY_PLUGIN_VERSION": "9.9.9"}):
-            self.assertEqual(await self.rpc.get_version(), {"ok": True, "version": "9.9.9"})
+            self.assertEqual(await self.rpc.get_version(),
+                             {"ok": True, "version": "9.9.9", "home": main.decky.DECKY_USER_HOME})
         with patch.dict(os.environ, {"DECKY_PLUGIN_VERSION": ""}):
             self.assertRegex((await self.rpc.get_version())["version"], r"^\d+\.\d+\.\d+$", "plugin.json's")
         self.rpc.updates.check.return_value = {"ok": True, "update_available": False}

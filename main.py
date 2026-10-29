@@ -52,17 +52,9 @@ def plugin_version() -> str:
 # The state the RPCs read exists from import; _main only has to hand over
 # Decky's logger and folders before the first call is answered.
 _ready = asyncio.Event()
-rpc = dk_rpc.boundary(decky.logger, _ready)
+# A refusal (bad input, or settings not loaded yet) answers with the state as it is; any other error is a bug.
+rpc = dk_rpc.boundary(decky.logger, _ready, shown=(vibrance_state.Refused,), state=lambda _: dict(state.public))
 controller = vibrance_control.Controller()
-
-
-async def _change(pending) -> dict:
-    """A control's answer: its new state, or why it was refused with the state as it is."""
-    try:
-        return dk_rpc.ok(await pending)
-    except vibrance_control.Refused as e:  # bad input, or settings not loaded yet; any other error is a bug
-        decky.logger.warning(f"{LOG} {pending.__name__} refused: {e}")
-        return dk_rpc.fail(str(e), dict(state.public))
 
 
 class Plugin:
@@ -72,7 +64,8 @@ class Plugin:
 
     @rpc
     async def get_version(self) -> dict:
-        return dk_rpc.ok(version=plugin_version())
+        # home: the About page shows a saved update under it as ~/…
+        return dk_rpc.ok(version=plugin_version(), home=decky.DECKY_USER_HOME)
 
     @rpc
     async def check_for_updates(self) -> dict:
@@ -84,23 +77,23 @@ class Plugin:
 
     @rpc
     async def set_sdr_enabled(self, enabled: bool, saturation=None) -> dict:
-        return await _change(controller.set_sdr_enabled(enabled, saturation))
+        return dk_rpc.ok(await controller.set_sdr_enabled(enabled, saturation))
 
     @rpc
     async def set_hdr_enabled(self, enabled: bool, saturation=None) -> dict:
-        return await _change(controller.set_hdr_enabled(enabled, saturation))
+        return dk_rpc.ok(await controller.set_hdr_enabled(enabled, saturation))
 
     @rpc
     async def set_sdr_saturation(self, value: float) -> dict:
-        return await _change(controller.set_sdr_saturation(value))
+        return dk_rpc.ok(await controller.set_sdr_saturation(value))
 
     @rpc
     async def set_hdr_saturation(self, value: float) -> dict:
-        return await _change(controller.set_hdr_saturation(value))
+        return dk_rpc.ok(await controller.set_hdr_saturation(value))
 
     @rpc
     async def reset(self) -> dict:
-        return await _change(controller.reset())
+        return dk_rpc.ok(await controller.reset())
 
     async def _main(self):
         try:

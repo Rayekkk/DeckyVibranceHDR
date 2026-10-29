@@ -312,7 +312,7 @@ class ReadFailure(FileCase):
                 self.assertTrue(M.state.public["settings_loaded"])
 
     async def test_a_lasting_save_failure_is_logged_once_not_every_retry(self):
-        self.mock(M.Controller, "_save", side_effect=OSError("read-only file system"))
+        self.mock(M.Controller, "_save", side_effect=OSError(30, "read-only file system"))
         error = self.mock(M.vibrance_state.logger, "error")
         for _ in range(3):
             M.state.public["settings_error"] = M.Controller._write_settings()
@@ -373,12 +373,13 @@ class SettingsWrites(FileCase):
 
     async def test_disk_full_does_not_prevent_disable_or_restore(self):
         await self.plugin.set_sdr_enabled(True)
-        self.mock(M.Controller, "_save", side_effect=OSError("disk full"))
+        self.mock(M.Controller, "_save", side_effect=OSError(28, "disk full", "/home/someone/.settings.json.1.tmp"))
         await self.plugin.set_sdr_enabled(False)
         await self.drain()
         self.assertFalse(M.state.public["sdr_applied"])
         self.assertEqual(self.live_sdr, 0.8)
         self.assertIn("disk full", M.state.public["settings_error"])
+        self.assertNotIn("someone", M.state.public["settings_error"], "the panel never shows a path")
         self.assertTrue(M.state.settings_dirty)
 
     async def test_disabled_hdr_slider_is_persisted(self):
@@ -501,7 +502,7 @@ class SettingsWrites(FileCase):
                 first.set()
                 release.wait(2)
             elif len(snapshots) == 2:
-                raise OSError("latest snapshot failed")
+                raise OSError(28, "latest snapshot failed")
         self.mock(M.Controller, "_save", side_effect=save)
         await self.plugin.set_hdr_saturation(1.2)
         try:

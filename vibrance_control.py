@@ -33,6 +33,7 @@ import shutil
 import time
 from contextlib import asynccontextmanager
 
+import dk_fs
 import dk_process
 import vibrance_effects
 import vibrance_host
@@ -297,7 +298,7 @@ class Controller:
             return ""
         except (OSError, ValueError, TypeError, RuntimeError) as exc:
             # Not the OSError's filename: mkstemp names a random temporary each try.
-            reason = exc.strerror if isinstance(exc, OSError) and exc.strerror else exc
+            reason = dk_fs.shown(exc)
             message = f"could not save settings: {reason}"
             if message != state.public["settings_error"]:  # retried on every panel tick
                 vibrance_state.logger.error(f"{LOG} settings save failed: {reason}")
@@ -406,7 +407,7 @@ class Controller:
                 raise
             except Exception as e:
                 if token == state.sdr_generation and not state.unloading:
-                    state.set_error("sdr", f"could not apply SDR: {vibrance_host.shown(e)}")
+                    state.set_error("sdr", f"could not apply SDR: {dk_fs.shown(e)}")
                 vibrance_state.logger.error(f"{LOG} SDR apply failed: {vibrance_host.loggable(e)}",
                                             exc_info=True)
 
@@ -466,7 +467,7 @@ class Controller:
                 if token == getattr(state, generation) and not state.unloading:
                     state.look_failures[component] += 1
                     state.set_error(look["error"],
-                                    f"could not apply the {name} LUT: {vibrance_host.shown(e)}")
+                                    f"could not apply the {name} LUT: {dk_fs.shown(e)}")
                 vibrance_state.logger.error(f"{LOG} {name} look failed: {vibrance_host.loggable(e)}",
                                             exc_info=True)
             finally:

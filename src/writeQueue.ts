@@ -8,7 +8,8 @@
 // read at a time that Decky replays itself, stale reads dropped, slow-call notices, refusals toasted even with the
 // panel closed), LegionGo2Companion src/shared.tsx mutationQueue and rgb.tsx (strict order, a write releases the
 // debounced ones before it, pending values sent when the panel closes), DeckyEQ src/controller.ts (debounce, a
-// snapshot store for React, D2 answers, a flush the caller can wait for, an unchanged poll that re-renders nothing).
+// snapshot store for React, D2 answers, a flush the caller can wait for, an unchanged poll that re-renders nothing),
+// DeckyLS src/index.tsx (the time of the last good read for staleNote), docs/UI.md §4–§5 (a refusal under its control).
 // Guarantees:
 // - One write at a time, in the order they were made; a write that never answers is waited for, never overtaken
 //   (the backend may still commit it), and `slow` says so after slowMs.
@@ -22,6 +23,10 @@
 //   given). Every call goes through settle(): a throwing call, a dead backend or a missing answer is { ok: false, error }
 //   and the queue goes on. A write's state becomes the base; a refusal (ok: false) goes to onError, also with no
 //   subscriber (Steam's toaster is global), and its state, when it has one, is shown.
+// - A refused write's text stays in `refused[key]` (shown under that control, UI.md §5) until the next write of that
+//   key is made; reads and other keys never clear it.
+// - `readAt` is when the backend last sent its state (a read or a write's answer), for staleNote; it is exact
+//   whenever `error` is set (an unchanged poll publishes nothing, so it may lag while all is well).
 // - Edits (patch) are shown on top of the base at once and each stays until its own write answers, so a later move
 //   never flickers back to an older answer.
 // - read(): skipped while any write is queued or running; one read at a time (a second call returns the running
@@ -41,6 +46,10 @@ export interface QueueView<T> {
   error: string;
   /** A call has not answered within slowMs (it is still waited for). */
   slow: "" | "read" | "write";
+  /** Why the last write of each key was refused, until that key is written again (the text under its control). */
+  refused: Readonly<Record<string, string>>;
+  /** Date.now() of the backend's last state (0 before the first): staleNote(Date.now() - readAt) once `error` is set. */
+  readAt: number;
 }
 
 export interface WriteOptions<T> {
@@ -64,10 +73,11 @@ export function createWriteQueue<T extends object>(read: () => Promise<Result<T>
   const jobs: Job<T>[] = [];
   const edits = new Map<keyof T, { id: number; value: T[keyof T] }>();
   const listeners = new Set<() => void>();
-  let base: T | null = null, error = "", slowWrite = false, slowRead = false;
+  let base: T | null = null, error = "", slowWrite = false, slowRead = false, readAt = 0;
+  let refused: Record<string, string> = {};
   let gen = 0, writing = false, disposed = false, running: Job<T> | null = null;
   let reading: Promise<void> | null = null;
-  let view: QueueView<T> = { state: null, error: "", slow: "" };
+  let view: QueueView<T> = { state: null, error: "", slow: "", refused, readAt };
 
   const publish = () => {
     if (disposed) return;
@@ -76,7 +86,7 @@ export function createWriteQueue<T extends object>(read: () => Promise<Result<T>
       state = { ...state };
       for (const [key, edit] of edits) state[key] = edit.value;
     }
-    view = { state, error, slow: slowWrite ? "write" : slowRead ? "read" : "" };
+    view = { state, error, slow: slowWrite ? "write" : slowRead ? "read" : "", refused, readAt };
     for (const listener of [...listeners]) listener();
   };
   const unpatch = (job: Job<T>) => {
@@ -103,9 +113,10 @@ export function createWriteQueue<T extends object>(read: () => Promise<Result<T>
         const result = await settle(Promise.resolve().then(() => job.call()));
         clearTimeout(timer);
         slowWrite = false;
-        if (result.state) base = result.state;
+        if (result.state) { base = result.state; readAt = Date.now(); }
         if (result.ok) error = "";
-        else if (!disposed) {
+        else if (job.key !== undefined) refused = { ...refused, [job.key]: result.error || "Unknown error" };
+        if (!result.ok && !disposed) {
           try { options.onError?.(result); } catch (e) { console.error(e); }
         }
         unpatch(job);
@@ -123,6 +134,10 @@ export function createWriteQueue<T extends object>(read: () => Promise<Result<T>
     if (disposed) return Promise.resolve<Result<T>>({ ok: false, error: "The panel was closed." });
     const job: Job<T> = { id: ++gen, key, call, patch: opts.patch ?? {}, ready: !opts.delayMs, waiters: [] };
     const promise = new Promise<Result<T>>(resolve => job.waiters.push(resolve));
+    if (key !== undefined && key in refused) {  // the next action on a control clears its text
+      refused = { ...refused };
+      delete refused[key];
+    }
     for (let i = jobs.length - 1; i >= 0; --i) {
       const queued = jobs[i];
       if (queued.key !== undefined && (queued.key === key || opts.supersedes?.includes(queued.key))) {
@@ -152,6 +167,7 @@ export function createWriteQueue<T extends object>(read: () => Promise<Result<T>
       reading = null;
       if (started === gen && !writing && !jobs.length) {
         if (result.ok && result.state) {
+          readAt = Date.now();
           if (!wasSlow && !error && base && JSON.stringify(result.state) === JSON.stringify(base)) return;
           base = result.state;
           error = "";

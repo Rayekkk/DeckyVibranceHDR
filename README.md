@@ -29,7 +29,7 @@ saved choices. Enabled settings continue working while the Quick Access Menu is 
 | **HDR saturation** | Adjusts games running in HDR, from 100–150%; shown when the panel is not known to lack HDR support |
 | **Enabled** | Turns each effect on or off independently and releases its display adjustment when switched off |
 | **Back to defaults** | Switches both effects off and returns both sliders to 100% |
-| **Updates** | Checks for a release and downloads its installable ZIP; keeps progress and results when the menu is reopened |
+| **About** | Version, author and license; its **Updates** section checks for a release and downloads its installable ZIP, and keeps progress and results when the menu is reopened |
 
 The menu explains clipping limits and failed changes. Background checks reapply
 enabled settings after detected gamescope/session recovery. Adjustments pause while
@@ -85,9 +85,9 @@ See [CHANGELOG.md](CHANGELOG.md) for the changes in each release. The release ba
 
 ### Updating
 
-1. Open **Updates → Check for updates**.
-2. If a newer release is available, choose **Download v<version>**.
-3. Wait for **Downloaded** and note the completed file path.
+1. Open **About → Check for updates** (at the bottom of the plugin's menu).
+2. If a newer release is available, choose **Download <version>**.
+3. Wait for **<version> downloaded** and note the file path after **Saved to**.
 4. Install that file as in [Installation](#installation): **Decky → Settings → Developer**,
    **Browse** next to **Install Plugin from ZIP File**, **Continue** on Decky's warning,
    then pick the file and confirm (turn on **Developer mode** under **General** first
@@ -114,7 +114,7 @@ and install the release ZIP manually. The updater offers published releases.
 4. Let the change finish and check **Now**, the **Last applied** status and any error.
 
 The slider shows your latest selection immediately. Applying it can take longer,
-especially when a colour table is being built. The menu shows **Preparing the colours...**
+especially when a colour table is being built. The menu shows **Preparing the colors…**
 while that work is running. Recent edits are grouped so an older selection does not
 keep delaying the one you want.
 
@@ -191,7 +191,7 @@ a notice clears by itself once the backend answers.
 | The HDR section is missing | Check whether the built-in panel advertises HDR/PQ. This is expected on the standard Legion Go S LCD. |
 | HDR changes do not affect a game | Confirm the game is actually running in HDR and check Last applied. The plugin does not enable a game's HDR mode. |
 | External display → Standing down | Adjustments are paused for the external screen. Return to the built-in display to resume the saved choices. |
-| Preparing the colours... or an older Last applied value | Wait for the latest build. If it stays pending, check the error and backend connection; build time is not fixed across devices. |
+| Preparing the colors… or an older Last applied value | Wait for the latest build. If it stays pending, check the error and backend connection; build time is not fixed across devices. |
 | An update check or download failed | Read the error and try again, or download the attached plugin ZIP from Releases and install it through Decky. |
 | Reloading takes several seconds | Decky 3.2.10 showed a loader shutdown issue during audits on both devices, and Decky 3.3.0 showed it again on the Odin 3 under FEX. The plugin cannot patch that loader issue. See the [Odin 3 / Armada audit](docs/AUDITS.md#device-validation-latest) for the reproduced limitation. |
 
@@ -289,7 +289,8 @@ the author's other Decky plugins and kept identical across them.
 | `vibrance_host.py` | File identity, the kernel's panel EDID |
 | `dk_update.py` | Release checks and downloads (`lego_updater.py` is only kept for older versions' updaters) |
 | `dk_fs.py`, `dk_process.py`, `dk_net.py`, `dk_rpc.py` | Safe file writes, running programs (natively under FEX), HTTPS, the call contract |
-| `src/index.tsx`, `src/updates.tsx` | The panel and its Updates section |
+| `src/index.tsx` | The panel, its About row and page |
+| `src/ui.tsx`, `src/about.tsx` | Shared panel parts: rows, states, the About page and its updater |
 | `src/writeQueue.ts` | Request ordering between the panel and the backend |
 
 GitHub Actions runs the backend tests on Linux and Windows (Python 3.14), then the

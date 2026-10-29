@@ -669,7 +669,7 @@ class Controls(PluginCase):
         M.Controller._save.assert_not_called()
 
     async def test_unchanged_value_can_retry_failed_apply_and_save(self):
-        M.Controller._save.side_effect = OSError("disk full")
+        M.Controller._save.side_effect = OSError(28, "disk full")
         await self.plugin.set_hdr_saturation(1.3)
         self.builder.side_effect = None
         self.builder.return_value = ""

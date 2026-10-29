@@ -2,21 +2,22 @@
 // Copyright (c) 2026 Rayekkk
 // https://github.com/Rayekkk/DeckyVibranceHDR
 
-import { callable, definePlugin } from "@decky/api";
+import { callable, definePlugin, useQuickAccessVisible } from "@decky/api";
 import {
-  ButtonItem,
   Field,
   PanelSection,
   PanelSectionRow,
   SliderField,
-  Spinner,
   staticClasses,
   ToggleField,
 } from "@decky/ui";
-import { FC, useEffect, useState } from "react";
-import { Result } from "./result";
-import { disposeUpdates, notify, UpdateSection } from "./updates";
+import { FC, ReactNode, useEffect, useState } from "react";
+import { AboutPage, UpdateCheck, UpdateController, UpdateDownload, UpdateSection } from "./about";
+import { Result, settle } from "./result";
+import { ActionButton, colors, notify, PageHeader, PageShell, SectionLink, statusPlaceholder } from "./ui";
 import { createWriteQueue } from "./writeQueue";
+
+const NAME = "Decky Vibrance HDR";
 
 interface State {
   ready: boolean;
@@ -55,6 +56,9 @@ const setHdrEnabled = callable<[boolean, number], Result<State>>("set_hdr_enable
 const setSdrSaturation = callable<[number], Result<State>>("set_sdr_saturation");
 const setHdrSaturation = callable<[number], Result<State>>("set_hdr_saturation");
 const resetAll = callable<[], Result<State>>("reset");
+const getVersion = callable<[], Result<never> & { version?: string; home?: string }>("get_version");
+const checkForUpdates = callable<[], UpdateCheck>("check_for_updates");
+const performUpdate = callable<[string], UpdateDownload>("perform_update");
 
 /** Shown while a write has not answered; the backend may still be working. */
 const WRITE_PENDING = "Backend write is still pending; waiting for its result";
@@ -75,7 +79,19 @@ const connectionLabel = (message: string) =>
 // QAM content can unmount while an RPC is in flight. Keep one queue across
 // openings so a previous panel cannot send an old edit after the new one.
 const queue = createWriteQueue<State>(getState,
-  { onError: result => notify("Setting failed", result.error || "Unknown error") });
+  { onError: result => notify(NAME, result.error || "Unknown error") });
+// Like the queue, a check or download outlives the panel; a reopened one shows its progress.
+const updates = new UpdateController({ check: checkForUpdates, download: performUpdate }, "deckyvibrancehdr");
+
+// The installed version and the home folder (for ~/ paths) are read once; a failed read is tried again by a later
+// opening, and a reopened panel shares the read in flight.
+let installed = { version: "", home: "" };
+let reading: Promise<void> | null = null;
+const readInstalled = () => installed.version ? Promise.resolve() : reading ??= settle(getVersion()).then(result => {
+  if (result.ok && result.version) installed = { version: result.version, home: result.home ?? "" };
+  reading = null;
+});
+const ABOUT_ICON = <><circle cx="12" cy="12" r="9" /><path d="M12 11v6m0-10h.01" /></>;
 
 const busy = (state: State | null, problem: string) => !state || !state.ready || !!problem || state.generating
   || state.sdr_generating || !!(state.sdr_error || state.sdr_look_error || state.hdr_error || state.settings_error);
@@ -83,6 +99,15 @@ const busy = (state: State | null, problem: string) => !state || !state.ready ||
 // Decky unmounts it while the Quick Access Menu is closed, which stops the polling.
 const Content: FC = () => {
   const [view, setView] = useState(queue.get());
+  const [page, setPage] = useState<"main" | "about">("main");
+  const [left, setLeft] = useState(false);  // About was just closed: its row takes the focus back.
+  const [about, setAbout] = useState(installed);
+  const visible = useQuickAccessVisible();
+  useEffect(() => {
+    let live = true;
+    void readInstalled().then(() => { if (live) setAbout(installed); });
+    return () => { live = false; };
+  }, []);
   useEffect(() => {
     setView(queue.get());
     return queue.subscribe(() => setView(queue.get()));
@@ -108,7 +133,7 @@ const Content: FC = () => {
       schedule();
     };
     void poll();
-    // A change that starts work (a colour table being prepared) brings the next poll forward.
+    // A change that starts work (a color table being prepared) brings the next poll forward.
     const off = queue.subscribe(schedule);
     return () => { stopped = true; off(); clearTimeout(timer); };
   }, []);
@@ -120,6 +145,9 @@ const Content: FC = () => {
   // backend is what decides the value that actually lands.
   const slide = (key: "sdr_saturation" | "hdr_saturation", set: (v: number) => Promise<Result<State>>) =>
     (v: number) => queue.write(key, () => set(v), { patch: { [key]: v } });
+  // A refused change says why under its control until that control is used again (UI.md §5); the toast says it too.
+  const why = (key: string, description?: ReactNode) => view.refused[key]
+    ? <>{description}<div role="alert" style={{ color: colors.error }}>{view.refused[key]}</div></> : description;
   const toggle = (half: "sdr" | "hdr", set: (on: boolean, saturation: number) => Promise<Result<State>>) =>
     (v: boolean) => {
       // The toggle carries the newest slider value and makes its unsent moves pointless.
@@ -128,13 +156,34 @@ const Content: FC = () => {
         { patch: { [`${half}_enabled`]: v, [`${half}_saturation`]: saturation }, supersedes: [`${half}_saturation`] });
     };
 
+  const version = about.version || "—";
+  if (page === "about") {
+    const back = () => { setLeft(true); setPage("main"); };
+    return (
+      <PageShell onBack={back}>
+        <PageHeader title="About" back={NAME} onBack={back} focus={visible} />
+        <AboutPage name={NAME} version={version} license="BSD-3-Clause" source="github.com/Rayekkk/DeckyVibranceHDR"
+          description="Raises color saturation in SDR and HDR, calibrated from your built-in screen."
+          notes="Copyright (c) 2026 Rayekkk. Dependency notices are included in the plugin package."
+          updates={updates} home={about.home} />
+      </PageShell>
+    );
+  }
+  // The last row of every layout; the key keeps its focus when the layout above it changes.
+  const aboutRow = (
+    <PanelSection key="about">
+      <SectionLink title="About" icon={ABOUT_ICON} focus={visible && left} onOpen={() => setPage("about")}
+        description={`Version ${version} · updates`} />
+    </PanelSection>
+  );
+
   if (!state) {
     return (
-      <PanelSection>
-        <PanelSectionRow>
-          {connectionError ? <Field label={connectionLabel(connectionError)} description={connectionError} /> : <Spinner />}
-        </PanelSectionRow>
-      </PanelSection>
+      <>
+        {statusPlaceholder({ label: `${NAME} unavailable`, error: connectionError, onRetry: () => void queue.read() })}
+        {/* A plugin that cannot start can still be updated. */}
+        {connectionError && <UpdateSection controller={updates} version={version} home={about.home} />}
+      </>
     );
   }
 
@@ -159,7 +208,7 @@ const Content: FC = () => {
         {state.settings_notice && <PanelSectionRow>
           <Field label={noticeLabel(state.settings_notice)} description={state.settings_notice} />
         </PanelSectionRow>}
-      </PanelSection><UpdateSection key="updates" /></>
+      </PanelSection>{aboutRow}</>
     );
   }
 
@@ -222,7 +271,7 @@ const Content: FC = () => {
         <PanelSectionRow>
           <ToggleField
             label="Enabled"
-            description="Applies to the Steam UI and any game not running in HDR."
+            description={why("sdr-toggle", "Applies to the Steam UI and any game not running in HDR.")}
             checked={state.sdr_enabled}
             onChange={toggle("sdr", setSdrEnabled)}
           />
@@ -233,12 +282,11 @@ const Content: FC = () => {
             <PanelSectionRow>
               <SliderField
                 label="Saturation"
-                description={
+                description={why("sdr_saturation",
                   state.sdr_saturation > state.sdr_soft_limit
-                    ? `Past ${pct(state.sdr_soft_limit)} the strongest colours start ` +
+                    ? `Past ${pct(state.sdr_soft_limit)} the strongest colors start ` +
                       "clipping and lose detail."
-                    : "100% is neutral; higher values make colours more saturated."
-                }
+                    : "100% is neutral; higher values make colors more saturated.")}
                 value={state.sdr_saturation}
                 min={state.sdr_min}
                 max={state.sdr_max}
@@ -252,7 +300,7 @@ const Content: FC = () => {
                 label="Now"
                 description={
                   state.sdr_generating
-                    ? "Preparing the colours..."
+                    ? "Preparing the colors…"
                     // Only a standard-gamut panel past the atom's range has a look,
                     // and there the slider is twice the look (test_controls SdrLookSplit).
                     : state.sdr_look_saturation !== null
@@ -277,7 +325,7 @@ const Content: FC = () => {
         <PanelSectionRow>
           <ToggleField
             label="Enabled"
-            description="Applies only to games actually running in HDR."
+            description={why("hdr-toggle", "Applies only to games actually running in HDR.")}
             checked={state.hdr_enabled}
             onChange={toggle("hdr", setHdrEnabled)}
           />
@@ -288,12 +336,11 @@ const Content: FC = () => {
             <PanelSectionRow>
               <SliderField
                 label="Saturation"
-                description={
+                description={why("hdr_saturation",
                   state.hdr_saturation > state.hdr_soft_limit
-                    ? `Past ${pct(state.hdr_soft_limit)} the strongest colours start ` +
+                    ? `Past ${pct(state.hdr_soft_limit)} the strongest colors start ` +
                       "clipping and lose detail."
-                    : "Raises colour saturation without changing brightness."
-                }
+                    : "Raises color saturation without changing brightness.")}
                 value={state.hdr_saturation}
                 min={state.hdr_min}
                 max={state.hdr_max}
@@ -307,7 +354,7 @@ const Content: FC = () => {
                 label="Now"
                 description={
                   state.generating
-                    ? "Preparing the colours..."
+                    ? "Preparing the colors…"
                     : state.hdr_applied_saturation !== null
                       ? `Last applied: ${pct(state.hdr_applied_saturation)}`
                       : state.hdr_saturation === 1
@@ -326,18 +373,18 @@ const Content: FC = () => {
 
       <PanelSection title="Reset">
         <PanelSectionRow>
-          <ButtonItem
-            layout="below"
+          <ActionButton
+            description={why("reset")}
             onClick={() => queue.write("reset", resetAll, {
               patch: { sdr_enabled: false, hdr_enabled: false, sdr_saturation: 1, hdr_saturation: 1 },
               supersedes: ["sdr_saturation", "hdr_saturation", "sdr-toggle", "hdr-toggle"] })}
           >
             Back to defaults
-          </ButtonItem>
+          </ActionButton>
         </PanelSectionRow>
       </PanelSection>
 
-      <UpdateSection key="updates" />
+      {aboutRow}
     </>
   );
 };
@@ -351,13 +398,13 @@ const VibranceIcon: FC = () => (
 );
 
 export default definePlugin(() => ({
-  name: "Decky Vibrance HDR",
-  titleView: <div className={staticClasses.Title}>Decky Vibrance HDR</div>,
+  name: NAME,
+  titleView: <div className={staticClasses.Title}>{NAME}</div>,
   content: <Content />,
   icon: <VibranceIcon />,
   onDismount() {
     queue.dispose();
-    disposeUpdates();
+    updates.dispose();
     /* the backend restores both settings in _unload */
   },
 }));

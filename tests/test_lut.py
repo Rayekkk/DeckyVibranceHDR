@@ -246,7 +246,8 @@ class Lut(PluginTest):
 
     def test_an_unwritable_folder_fails_before_the_build(self):
         with tempfile.TemporaryDirectory() as folder:
-            missing = os.path.join(folder, "gone", "runtime")
+            Path(folder, "file").write_text("x")
+            missing = os.path.join(folder, "file", "runtime")  # cannot be created either
             with patch.object(M.vibrance_effects, "runtime_dir", return_value=missing), \
                     patch.object(M.vibrance_lutfile, "generate") as build, \
                     patch.object(M.vibrance_lutfile, "disabled", False):
@@ -264,6 +265,15 @@ class Lut(PluginTest):
         self.assertIn("Permission denied: hdr-look-0.cube.123.tmp", error.call_args[0][0])
         self.assertNotIn("someone", error.call_args[0][0])
         self.assertEqual(M.vibrance_host.loggable(ValueError("bad /x")), "bad /x")
+
+    def test_a_lasting_write_failure_is_logged_once_though_each_try_names_a_new_temporary(self):
+        failures = [OSError(13, "Permission denied", f".hdr-look-0.cube.1.{n}.tmp") for n in range(3)]
+        with patch.object(M.vibrance_lutfile, "write", side_effect=failures), \
+                patch.object(M.vibrance_effects, "runtime_dir", return_value="/run"), \
+                patch.object(M.vibrance_state.logger, "error") as error:
+            for _ in failures:
+                self.assertEqual(M.vibrance_effects.write_look(1.3, 0, prefix="lasting-look"), "")
+        self.assertEqual(error.call_count, 1)
 
     def test_an_unexpected_build_error_leaves_no_temporary_file(self):
         with tempfile.TemporaryDirectory() as folder:
