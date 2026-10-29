@@ -1367,22 +1367,32 @@ class TrackedTaskLogging(PluginCase):
         self.assertEqual(raised, [])                             # no error inside the callback
 
 
+# What the panel and the log show of a failure: never the folders of a path (they hold the user name).
+VANISHED = FileNotFoundError(2, "No such file or directory", "/home/someone/homebrew/x.cube")
+
+
 class SdrApplyCrashIsShown(PluginCase):
     async def test_an_sdr_write_that_raises_is_reported_in_the_menu(self):
         M.state.public.update(sdr_enabled=True, sdr_applied=True)
-        self.mock(M.vibrance_effects, "apply_sdr", side_effect=OSError("xprop vanished"))
-        await self.plugin.set_sdr_saturation(1.6)
-        await self.drain()
-        self.assertIn("could not apply SDR: xprop vanished", M.state.public["sdr_error"])
+        self.mock(M.vibrance_effects, "apply_sdr", side_effect=VANISHED)
+        with self.assertLogs(M.vibrance_state.logger, "ERROR") as logged:
+            await self.plugin.set_sdr_saturation(1.6)
+            await self.drain()
+        self.assertEqual("could not apply SDR: No such file or directory", M.state.public["sdr_error"])
+        self.assertIn("No such file or directory: x.cube", logged.output[0])
+        self.assertIn("Traceback", logged.output[0])
+        self.assertNotIn("someone", "".join(logged.output).split("Traceback")[0])
 
 
 class LookCrashIsCountedAndShown(PluginCase):
     async def test_a_look_commit_that_raises_is_reported_and_counted(self):
         M.state.public.update(hdr_enabled=True)
-        self.mock(M.vibrance_effects, "commit_look", side_effect=OSError("xprop vanished"))
-        await self.plugin.set_hdr_saturation(1.3)
-        await self.drain()
-        self.assertIn("could not apply the HDR LUT: xprop vanished", M.state.public["hdr_error"])
+        self.mock(M.vibrance_effects, "commit_look", side_effect=VANISHED)
+        with self.assertLogs(M.vibrance_state.logger, "ERROR") as logged:
+            await self.plugin.set_hdr_saturation(1.3)
+            await self.drain()
+        self.assertEqual("could not apply the HDR LUT: No such file or directory", M.state.public["hdr_error"])
+        self.assertIn("HDR look failed: No such file or directory: x.cube", logged.output[0])
         self.assertEqual(M.state.look_failures["hdr"], 1)
         self.assertFalse(M.state.public["generating"])
 

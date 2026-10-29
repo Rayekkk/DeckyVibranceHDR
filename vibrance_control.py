@@ -104,8 +104,7 @@ def _offload(fn, *args):
     return asyncio.get_running_loop().run_in_executor(None, fn, *args)
 
 
-class Refused(ValueError):
-    """A change the plugin cannot make now; its message is shown to the user."""
+Refused = vibrance_state.Refused
 
 
 @asynccontextmanager
@@ -170,7 +169,7 @@ class Controller:
 
     async def set_sdr_enabled(self, enabled: bool, saturation=None) -> dict:
         if not isinstance(enabled, bool):
-            raise ValueError("enabled must be a boolean")
+            raise Refused("enabled must be a boolean")
         if saturation is not None:
             saturation = vibrance_state.clamp(saturation, SDR_MIN, state.public["sdr_max"])
         async with _mutation() as allowed:
@@ -203,7 +202,7 @@ class Controller:
 
     async def set_hdr_enabled(self, enabled: bool, saturation=None) -> dict:
         if not isinstance(enabled, bool):
-            raise ValueError("enabled must be a boolean")
+            raise Refused("enabled must be a boolean")
         if saturation is not None:
             saturation = vibrance_state.clamp(saturation, HDR_MIN, HDR_MAX)
         async with _mutation() as allowed:
@@ -383,7 +382,9 @@ class Controller:
             if t in state.tasks:
                 state.tasks.remove(t)
             if not t.cancelled() and t.exception() is not None:
-                vibrance_state.logger.error(f"{LOG} background task failed: {t.exception()}")
+                vibrance_state.logger.error(f"{LOG} background task failed: "
+                                            f"{vibrance_host.loggable(t.exception())}",
+                                            exc_info=t.exception())
         task.add_done_callback(done)
 
     def _schedule_sdr(self) -> None:
@@ -405,8 +406,9 @@ class Controller:
                 raise
             except Exception as e:
                 if token == state.sdr_generation and not state.unloading:
-                    state.set_error("sdr", f"could not apply SDR: {e}")
-                vibrance_state.logger.error(f"{LOG} SDR apply failed: {e}")
+                    state.set_error("sdr", f"could not apply SDR: {vibrance_host.shown(e)}")
+                vibrance_state.logger.error(f"{LOG} SDR apply failed: {vibrance_host.loggable(e)}",
+                                            exc_info=True)
 
         self._queue_worker("sdr", token, _run, SDR_COALESCE_S)
 
@@ -463,8 +465,10 @@ class Controller:
             except Exception as e:
                 if token == getattr(state, generation) and not state.unloading:
                     state.look_failures[component] += 1
-                    state.set_error(look["error"], f"could not apply the {name} LUT: {e}")
-                vibrance_state.logger.error(f"{LOG} {name} look failed: {e}")
+                    state.set_error(look["error"],
+                                    f"could not apply the {name} LUT: {vibrance_host.shown(e)}")
+                vibrance_state.logger.error(f"{LOG} {name} look failed: {vibrance_host.loggable(e)}",
+                                            exc_info=True)
             finally:
                 if token == getattr(state, generation):
                     state.public[look["generating"]] = False
@@ -630,7 +634,7 @@ class Controller:
                     state.resume_event.clear()
                     return  # The same worker restarts with the newest resume.
                 except asyncio.TimeoutError:
-                    pass
+                    pass  # no resume in this step: go on to the write
             async with state.mutation_lock:
                 if state.unloading or token != state.reassert_generation:
                     return
@@ -788,7 +792,8 @@ class Controller:
                 raise
             except Exception as e:
                 if logged.get(stage) != str(e):  # a lasting failure repeats every tick
-                    vibrance_state.logger.error(f"{LOG} monitor failed: {e}")
+                    vibrance_state.logger.error(f"{LOG} monitor failed: {vibrance_host.loggable(e)}",
+                                                exc_info=True)
                     logged[stage] = str(e)
                 await asyncio.sleep(2.0)
 
@@ -1054,4 +1059,4 @@ class Controller:
                     os.unlink(os.path.join(vibrance_effects.runtime_dir(),
                                            f"{look['prefix']}-{slot}.cube"))
                 except OSError:
-                    pass
+                    pass  # never written, or already gone

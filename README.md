@@ -246,7 +246,7 @@ replaces the unsent slider changes it makes pointless.
 <details>
 <summary><b>Build, test and package from source</b></summary>
 
-Use Node.js **24** (the CI version; 22 or newer works) and Python **3.10+**. The npm scripts call
+Use Node.js **24** (the CI version; 22 or newer works) and Python **3.14** (what Decky 3.3.1+ and SteamOS run). The npm scripts call
 `python`; where only `python3` exists, install the `python-is-python3` package
 (a shell alias is not enough for npm scripts).
 
@@ -255,7 +255,7 @@ git clone https://github.com/Rayekkk/DeckyVibranceHDR
 cd DeckyVibranceHDR
 npm ci
 npm run check
-npm audit --audit-level=low
+npm audit --audit-level=moderate
 ```
 
 `npm run check` runs the type check, the backend tests (`python -W error`), the
@@ -292,9 +292,8 @@ the author's other Decky plugins and kept identical across them.
 | `src/index.tsx`, `src/updates.tsx` | The panel and its Updates section |
 | `src/writeQueue.ts` | Request ordering between the panel and the backend |
 
-GitHub Actions runs the backend tests on Linux (Python 3.10, 3.11 and 3.14) and
-Windows, then the type check, dependency audit, panel tests, build and package with
-Node.js 24. On a tag build the package fails unless the tag, `plugin.json`,
+GitHub Actions runs the backend tests on Linux and Windows (Python 3.14), then the
+type check, dependency audit, panel tests, build and package with Node.js 24. On a tag build the package fails unless the tag, `plugin.json`,
 `package.json`, the lockfile and the newest CHANGELOG release agree. It uploads the
 ZIP as a build artifact; it does not publish a release.
 
@@ -361,7 +360,7 @@ reviewed the results and chose what was released.
 The AI was used to:
 
 - write the Python backend, the colour maths and the Decky panel;
-- build the automated test suites (about 570 tests run on Linux and Windows for every change);
+- build the automated test suites (about 590 tests run on Linux and Windows for every change);
 - audit the code for bugs, security issues and wasted work, with every finding checked by
   independent review passes and, where possible, reproduced before it was fixed;
 - research how gamescope maps SDR colours and applies colour tables (its source code and the

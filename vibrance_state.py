@@ -56,9 +56,13 @@ DEFAULT_SETTINGS = {
 }
 
 
+class Refused(ValueError):
+    """A change the plugin cannot make now; its message is shown to the user."""
+
+
 def clamp(v: float, lo: float, hi: float) -> float:
     if isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v):
-        raise ValueError("saturation must be a finite number")
+        raise Refused("saturation must be a finite number")
     return min(max(float(v), lo), hi)
 
 

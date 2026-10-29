@@ -95,7 +95,7 @@ def write(path, saturation, encoding, source_white, cancelled) -> bool:
             try:
                 os.unlink(tmp)
             except FileNotFoundError:
-                pass
+                pass  # the usual case: no leftover at the name
             with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL
                                    | getattr(os, "O_NOFOLLOW", 0)
                                    | getattr(os, "O_CLOEXEC", 0), 0o644), "w") as f:
@@ -122,7 +122,7 @@ def write(path, saturation, encoding, source_white, cancelled) -> bool:
             try:
                 os.unlink(tmp)
             except OSError:
-                pass
+                pass  # never created, or already renamed into place; the error that brought us here matters
             if isinstance(e, vibrance_lut.BuildCancelled):
                 return False
             raise

@@ -36,7 +36,10 @@ class RpcAnswers(PluginCase):
         for call, why in ((self.rpc.set_sdr_enabled("yes"), "enabled must be a boolean"),
                           (self.rpc.set_hdr_saturation(float("nan")), "finite number"),
                           (self.rpc.set_sdr_saturation("1.2"), "finite number")):
-            answer = await call
+            with self.assertLogs(main.decky.logger, "WARNING") as logged:
+                answer = await call
+            self.assertIn("refused: ", logged.output[0])
+            self.assertIn(why, logged.output[0])
             self.assertFalse(answer["ok"])
             self.assertIn(why, answer["error"])
             self.assertEqual(answer["state"], M.state.public, "the panel shows the real state at once")
@@ -51,6 +54,14 @@ class RpcAnswers(PluginCase):
         self.assertFalse(answer["ok"])
         self.assertIn("RuntimeError", answer["error"])
         self.assertNotIn("/home", answer["error"])
+
+    async def test_a_value_error_from_a_bug_is_not_taken_for_a_refusal(self):
+        self.mock(self.plugin, "reset", side_effect=ValueError("singular matrix"))
+        with self.assertLogs(main.decky.logger, "ERROR") as logged:
+            answer = await self.rpc.reset()
+        self.assertEqual(answer["error"], "Unexpected error (ValueError). Details are in the Decky log.")
+        self.assertNotIn("state", answer)
+        self.assertIn("Traceback", logged.output[0])
 
     async def test_version_and_updates_go_to_the_shared_updater(self):
         with patch.dict(os.environ, {"DECKY_PLUGIN_VERSION": "9.9.9"}):

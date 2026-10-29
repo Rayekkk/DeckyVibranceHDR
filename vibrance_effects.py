@@ -96,7 +96,7 @@ def runtime_dir() -> str:
     try:
         os.makedirs(path, exist_ok=True)
     except OSError:
-        pass
+        pass  # the LUT write that follows fails and reports it
     return path
 
 

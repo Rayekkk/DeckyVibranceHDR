@@ -4,11 +4,9 @@ All notable changes to Decky Vibrance HDR, newest first.
 
 ## [Unreleased]
 
-Unreleased.
-
 ### Changed
 
-#### Menu
+**Menu**
 
 - Descriptions in the menu use plain words instead of terms such as LUT, EDID
   or gamut. Control names are unchanged.
@@ -27,7 +25,7 @@ Unreleased.
 
 ### Fixed
 
-#### Display and colour
+**Display and colour**
 
 - Disabling the plugin or restarting Decky puts the original colours back even
   when the plugin was in the middle of another display change at that moment.
@@ -40,7 +38,7 @@ Unreleased.
 - Slider and switch changes wait less for background display checks when the
   display server answers slowly.
 
-#### Settings and updates
+**Settings and updates**
 
 - Settings survive a power cut right after a change, and files left by an
   interrupted save are cleaned up.
@@ -54,8 +52,8 @@ Unreleased.
   check.
 - An update download that ends early is reported as failed instead of being
   kept, and a download in progress stops when the plugin stops.
-- Logs and settings errors name only the file, not the folders that contain
-  your user name.
+- Error messages in the menu no longer show the folders that contain your
+  user name; the full details are in the Decky log.
 
 ## [1.2.0] - 2026-10-21
 

@@ -60,7 +60,8 @@ async def _change(pending) -> dict:
     """A control's answer: its new state, or why it was refused with the state as it is."""
     try:
         return dk_rpc.ok(await pending)
-    except ValueError as e:  # bad input, or settings not loaded yet (vibrance_control.Refused)
+    except vibrance_control.Refused as e:  # bad input, or settings not loaded yet; any other error is a bug
+        decky.logger.warning(f"{LOG} {pending.__name__} refused: {e}")
         return dk_rpc.fail(str(e), dict(state.public))
 
 
