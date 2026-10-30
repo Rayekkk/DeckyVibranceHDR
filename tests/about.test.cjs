@@ -56,7 +56,7 @@ test('the page is info first and Updates last', async () => {
   const h = await open([]);
   all(h.render()).find(n => n.type === 'Field' && n.props.label === 'About').props.onActivate();
   const titles = all(h.render()).filter(n => n.type === 'PanelSection').map(n => n.props.title);
-  assert.deepEqual(titles, ['About', 'Decky Vibrance HDR', 'Updates']);
+  assert.deepEqual(titles, ['About', 'Decky Vibrance HDR', "Rayek's store", 'Updates']);
 });
 
 test('the updater uses this plugin\'s RPCs and stops when the plugin unloads', async () => {

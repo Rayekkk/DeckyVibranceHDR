@@ -83,6 +83,11 @@ Normal use needs no terminal commands. To make your own package, follow
 
 See [CHANGELOG.md](CHANGELOG.md) for the changes in each release. The release badge and download links follow published releases.
 
+**Rayek's store:** **About → Use Rayek's store** sets Decky's store channel to Rayek's store
+(`https://decky.rayek.workers.dev`) after you confirm, so Decky's **Store** tab lists Rayek's plugins and offers
+their updates. Plugins from the official store stay installed, but get no update offers while it is selected;
+switch back in **Decky Settings → General → Store channel → Default**.
+
 ### Updating
 
 1. Open **About → Check for updates** (at the bottom of the plugin's menu).
