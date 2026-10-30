@@ -2,7 +2,7 @@
 
 All notable changes to Decky Vibrance HDR, newest first.
 
-## [Unreleased]
+## [1.3.0] - 2026-10-30
 
 ### ✨ Added
 
