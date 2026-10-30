@@ -291,7 +291,7 @@ All notable changes to Decky Vibrance HDR, newest first.
 - Unloading or uninstalling the plugin waits for any LUT write in progress before generated files are
   removed.
 
-## 1.0.0
+## [1.0.0] - 2026-07-28
 
 ### ✨ Added
 
